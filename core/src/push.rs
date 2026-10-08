@@ -1,6 +1,7 @@
 //! WebDAV-Push (dav_push): subscription keys, registration, RFC 8291 decryption, ntfy listener.
 
 use crate::caldav::{Element, PUSH, xml_escape};
+use crate::json::Json;
 use crate::{Client, Error, Result, b64decode, b64encode, store};
 use ring::{aead, hkdf};
 use rusqlite::params;
@@ -214,43 +215,21 @@ fn ntfy_stream(url: &str, f: &mut dyn FnMut(&str, Vec<u8>)) -> Result<()> {
     let reader = std::io::BufReader::new(resp.into_body().into_reader());
     for line in reader.lines() {
         let line = line.map_err(|e| Error::Net(e.to_string()))?;
-        if json_str(&line, "event").as_deref() != Some("message") {
+        let Some(m) = Json::parse(&line) else {
+            continue;
+        };
+        let field = |k: &str| m.get(k).and_then(Json::str).unwrap_or_default().to_string();
+        if field("event") != "message" {
             continue;
         }
-        let msg = json_str(&line, "message").unwrap_or_default();
-        let body = if json_str(&line, "encoding").as_deref() == Some("base64") {
-            b64decode(&msg)?
+        let body = if field("encoding") == "base64" {
+            b64decode(&field("message"))?
         } else {
-            msg.into_bytes()
+            field("message").into_bytes()
         };
-        f(&json_str(&line, "id").unwrap_or_default(), body);
+        f(&field("id"), body);
     }
     Ok(())
-}
-
-// ponytail: flat JSON string lookup for ntfy's fixed one-line objects; swap for a real parser if we read nested JSON.
-fn json_str(line: &str, key: &str) -> Option<String> {
-    let start = line.find(&format!("\"{key}\":\""))? + key.len() + 4;
-    let mut out = String::new();
-    let mut chars = line[start..].chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '"' => return Some(out),
-            '\\' => match chars.next()? {
-                'n' => out.push('\n'),
-                't' => out.push('\t'),
-                'u' => {
-                    let hex: String = chars.by_ref().take(4).collect();
-                    out.push(
-                        char::from_u32(u32::from_str_radix(&hex, 16).ok()?).unwrap_or('\u{fffd}'),
-                    );
-                }
-                c => out.push(c),
-            },
-            c => out.push(c),
-        }
-    }
-    None
 }
 
 fn public_key(private: &[u8]) -> Result<Vec<u8>> {
@@ -358,13 +337,5 @@ mod tests {
     fn http_date_format() {
         assert_eq!(http_date(1791460800), "Thu, 08 Oct 2026 12:00:00 GMT");
         assert_eq!(http_date(0), "Thu, 01 Jan 1970 00:00:00 GMT");
-    }
-
-    #[test]
-    fn ntfy_json() {
-        let l = r#"{"id":"abc","time":1,"event":"message","topic":"t","message":"PD9\/eG1sA","encoding":"base64"}"#;
-        assert_eq!(json_str(l, "event").unwrap(), "message");
-        assert_eq!(json_str(l, "message").unwrap(), "PD9/eG1sA");
-        assert_eq!(json_str(l, "missing"), None);
     }
 }

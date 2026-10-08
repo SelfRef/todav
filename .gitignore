@@ -1,4 +1,5 @@
 /target
 /tmp
+/PLAN.md
 .env
-/tmp
+gschemas.compiled

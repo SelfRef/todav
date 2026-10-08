@@ -43,16 +43,22 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("ls") => {
             let list = find_list(&client, &arg(1)?)?;
-            let all = args.iter().any(|a| a == "-a");
-            for t in client.tasks(list.href, all) {
-                let cat = t.category.map(|c| format!(" [{c}]")).unwrap_or_default();
+            let line = |t: &todav_core::Task| {
                 let indent = if t.parent_uid.is_some() { "  ↳ " } else { "" };
-                println!(
-                    "{} {indent}{}{cat}  {}",
-                    if t.done { "[x]" } else { "[ ]" },
-                    t.summary,
-                    t.uid
-                );
+                let mark = if t.done { "[x]" } else { "[ ]" };
+                println!("  {mark} {indent}{}  {}", t.summary, t.uid);
+            };
+            for g in client.grouped(list.href.clone()) {
+                println!("{}", g.name.as_deref().unwrap_or("Other"));
+                g.tasks.iter().for_each(line);
+            }
+            if args.iter().any(|a| a == "-a") {
+                println!("Done");
+                client
+                    .tasks(list.href, true)
+                    .iter()
+                    .filter(|t| t.done)
+                    .for_each(line);
             }
         }
         Some("add") => {

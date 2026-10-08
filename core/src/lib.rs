@@ -1,5 +1,8 @@
 pub mod caldav;
+mod config;
 pub mod ical;
+pub mod json;
+mod login;
 pub mod push;
 pub mod store;
 mod sync;
@@ -9,6 +12,8 @@ use ical::Calendar;
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
 
+pub use config::{CategoryGroup, CategoryMeta};
+pub use login::{Credentials, LoginFlow, login_flow_poll, login_flow_start};
 pub use push::PushRegistration;
 pub use sync::SyncReport;
 
@@ -113,7 +118,10 @@ impl Client {
             || store::kv_get(&db, "account_user")?.as_deref() != Some(&user)
         {
             // Different account: local data belongs to the old one.
-            db.execute_batch("DELETE FROM tasks; DELETE FROM lists;")?;
+            db.execute_batch(
+                "DELETE FROM tasks; DELETE FROM lists;
+                 DELETE FROM kv WHERE key LIKE 'config_%' OR key IN ('push_resource', 'conflict_log');",
+            )?;
         }
         store::kv_set(&db, "account_url", &url)?;
         store::kv_set(&db, "account_user", &user)?;
@@ -127,6 +135,27 @@ impl Client {
             url: store::kv_get(&db, "account_url").ok()??,
             user: store::kv_get(&db, "account_user").ok()??,
         })
+    }
+
+    /// Forget the account and all local data (keeps device keys).
+    pub fn logout(&self) -> Result<()> {
+        let _ = self.push_unregister();
+        let db = self.db.lock().unwrap();
+        db.execute_batch(
+            "DELETE FROM tasks; DELETE FROM lists;
+             DELETE FROM kv WHERE key LIKE 'config_%' OR key LIKE 'account_%' OR key IN ('push_resource', 'conflict_log');",
+        )?;
+        *self.dav.lock().unwrap() = None;
+        Ok(())
+    }
+
+    /// Free-form front-end settings (ntfy URL, pinned list, ...), stored next to the data.
+    pub fn setting(&self, key: String) -> Option<String> {
+        store::kv_get(&self.db.lock().unwrap(), &format!("setting_{key}")).ok()?
+    }
+
+    pub fn set_setting(&self, key: String, value: String) -> Result<()> {
+        store::kv_set(&self.db.lock().unwrap(), &format!("setting_{key}"), &value)
     }
 
     fn dav(&self) -> Result<Arc<Dav>> {

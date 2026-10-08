@@ -238,6 +238,7 @@ impl Dav {
         let origin = url.splitn(4, '/').take(3).collect::<Vec<_>>().join("/");
         let agent = ureq::Agent::config_builder()
             .allow_non_standard_methods(true)
+            .user_agent("Todav")
             .http_status_as_error(false)
             .timeout_global(Some(std::time::Duration::from_secs(30)))
             .build()
@@ -320,13 +321,15 @@ impl Dav {
         Ok(multistatus(&r.body)?.0)
     }
 
-    pub fn discover(&self) -> Result<Vec<RemoteList>> {
-        let root = self.root.clone();
-        let p = self.propfind(&root, "0", "<d:current-user-principal/>")?;
-        let principal = p
-            .first()
+    pub fn principal(&self) -> Result<String> {
+        let p = self.propfind(&self.root, "0", "<d:current-user-principal/>")?;
+        p.first()
             .and_then(|r| r.props.find_text(DAV, "href"))
-            .ok_or_else(|| Error::Parse("no current-user-principal".into()))?;
+            .ok_or_else(|| Error::Parse("no current-user-principal".into()))
+    }
+
+    pub fn discover(&self) -> Result<Vec<RemoteList>> {
+        let principal = self.principal()?;
         let p = self.propfind(&principal, "0", "<c:calendar-home-set/>")?;
         let home = p
             .first()

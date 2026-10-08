@@ -1,8 +1,8 @@
 //! Runs against the real server from the workspace `.env`: `cargo test -p todav-core --features integration`.
-//! Each test creates its own calendar and deletes it afterwards.
+//! Each test owns a calendar `it-<name>` (created once: Nextcloud rate-limits MKCALENDAR) and empties it first.
 #![cfg(feature = "integration")]
 
-use todav_core::caldav::Dav;
+use todav_core::caldav::{Dav, SyncResult};
 use todav_core::{Client, now};
 
 fn env() -> (String, String, String) {
@@ -21,7 +21,7 @@ fn env() -> (String, String, String) {
     )
 }
 
-/// A throwaway task calendar plus two independent "devices".
+/// A task calendar of our own (emptied first) plus two independent "devices".
 struct Fixture {
     dav: Dav,
     href: String,
@@ -33,14 +33,21 @@ impl Fixture {
     fn new(name: &str) -> Fixture {
         let (url, user, pass) = env();
         let dav = Dav::new(&url, &user, &pass);
-        let href = format!("/remote.php/dav/calendars/{user}/it-{name}-{}/", now());
+        let href = format!("/remote.php/dav/calendars/{user}/it-{name}/");
         let body = format!(
             r#"<?xml version="1.0"?><c:mkcalendar xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:set><d:prop><d:displayname>it-{name}</d:displayname><c:supported-calendar-component-set><c:comp name="VTODO"/></c:supported-calendar-component-set></d:prop></d:set></c:mkcalendar>"#
         );
-        assert_eq!(
-            dav.request("MKCALENDAR", &href, &[], &body).unwrap().status,
-            201
-        );
+        let existing = match dav.sync_collection(&href, "") {
+            Ok(SyncResult::Changes { changed, .. }) => changed,
+            _ => {
+                let status = dav.request("MKCALENDAR", &href, &[], &body).unwrap().status;
+                assert!(status == 201 || status == 405, "MKCALENDAR {status}");
+                Vec::new()
+            }
+        };
+        for (h, _, _) in existing {
+            dav.delete(&h, None, None).unwrap();
+        }
         let client = |dev: &str| {
             let dir = std::env::temp_dir().join(format!("todav-it-{name}-{dev}-{}", now()));
             let c = Client::open(dir.to_string_lossy().into()).unwrap();
@@ -51,12 +58,6 @@ impl Fixture {
         };
         let (a, b) = (client("a"), client("b"));
         Fixture { dav, href, a, b }
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = self.dav.request("DELETE", &self.href, &[], "");
     }
 }
 

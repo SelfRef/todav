@@ -24,6 +24,7 @@ impl Client {
         for l in &remote {
             self.pull(&l.href, &mut report)?;
         }
+        self.sync_config()?;
         Ok(report)
     }
 
