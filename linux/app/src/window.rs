@@ -8,6 +8,13 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use todav_core::{Task, TaskPatch};
 
+/// Libadwaita only styles plain buttons as pills; round the ends of the sign-in split button to match.
+const CSS: &str = "
+splitbutton.pill { border-radius: 9999px; }
+splitbutton.pill > button { padding: 10px 20px 10px 32px; border-radius: 9999px 0 0 9999px; }
+splitbutton.pill > menubutton > button { padding: 10px 16px 10px 12px; border-radius: 0 9999px 9999px 0; }
+";
+
 /// Completed tasks shown in the "Done" expander, newest first.
 const DONE_SHOWN: usize = 50;
 
@@ -27,7 +34,7 @@ struct Ui {
     groups: gtk::Box,
     server: adw::EntryRow,
     ntfy: adw::EntryRow,
-    login: gtk::Button,
+    login: adw::SplitButton,
     cancel_login: gtk::Button,
     last_error: RefCell<String>,
 }
@@ -215,8 +222,12 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     let form = adw::PreferencesGroup::new();
     form.add(&server);
     form.add(&ntfy);
-    let login = gtk::Button::builder()
+    let login_menu = gio::Menu::new();
+    login_menu.append(Some("Copy Login Link"), Some("win.copy-login"));
+    let login = adw::SplitButton::builder()
         .label("Sign In with Browser")
+        .menu_model(&login_menu)
+        .dropdown_tooltip("More Sign-In Options")
         .halign(gtk::Align::Center)
         .build();
     login.add_css_class("suggested-action");
@@ -253,6 +264,14 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     stack.add_named(&split, Some("main"));
     let toasts = adw::ToastOverlay::new();
     toasts.set_child(Some(&stack));
+
+    let css = gtk::CssProvider::new();
+    css.load_from_string(CSS);
+    gtk::style_context_add_provider_for_display(
+        &login.display(),
+        &css,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -344,16 +363,19 @@ fn connect(ui: &Rc<Ui>) {
     ui.window.add_controller(keys);
 
     let weak = Rc::downgrade(ui);
-    ui.login.connect_clicked(move |btn| {
-        let Some(ui) = weak.upgrade() else { return };
-        let server = ui.server.text().trim().to_string();
-        let ntfy = ui.ntfy.text().trim().to_string();
-        btn.set_sensitive(false);
-        btn.set_label("Waiting for Browser…");
-        ui.cancel_login.set_visible(true);
-        let attempt = LOGIN_ATTEMPT.fetch_add(1, Ordering::SeqCst) + 1;
-        std::thread::spawn(move || login_thread(attempt, server, ntfy));
+    ui.login.connect_clicked(move |_| {
+        if let Some(ui) = weak.upgrade() {
+            start_login(&ui, false);
+        }
     });
+    let weak = Rc::downgrade(ui);
+    let copy = gio::SimpleAction::new("copy-login", None);
+    copy.connect_activate(move |_, _| {
+        if let Some(ui) = weak.upgrade() {
+            start_login(&ui, true);
+        }
+    });
+    ui.window.add_action(&copy);
 
     let weak = Rc::downgrade(ui);
     ui.cancel_login.connect_clicked(move |_| {
@@ -362,6 +384,21 @@ fn connect(ui: &Rc<Ui>) {
             reset_login(&ui);
         }
     });
+}
+
+/// Start Login Flow v2; `copy` puts the login link on the clipboard instead of opening the browser.
+fn start_login(ui: &Ui, copy: bool) {
+    let server = ui.server.text().trim().to_string();
+    let ntfy = ui.ntfy.text().trim().to_string();
+    ui.login.set_sensitive(false);
+    ui.login.set_label(if copy {
+        "Waiting for Sign-In…"
+    } else {
+        "Waiting for Browser…"
+    });
+    ui.cancel_login.set_visible(true);
+    let attempt = LOGIN_ATTEMPT.fetch_add(1, Ordering::SeqCst) + 1;
+    std::thread::spawn(move || login_thread(attempt, server, ntfy, copy));
 }
 
 /// Bumped on every sign-in click and on cancel; a login thread only acts while its number is current.
@@ -377,8 +414,8 @@ fn reset_login(ui: &Ui) {
     ui.cancel_login.set_visible(false);
 }
 
-/// Login Flow v2: open the browser, poll until the user approves, then store the app password.
-fn login_thread(attempt: u64, server: String, ntfy: String) {
+/// Login Flow v2: open the browser (or copy the link), poll until the user approves, then store the app password.
+fn login_thread(attempt: u64, server: String, ntfy: String, copy: bool) {
     let fail = |msg: String| {
         glib::MainContext::default().invoke(move || {
             if let Some(ui) = ui().filter(|_| current(attempt)) {
@@ -396,8 +433,16 @@ fn login_thread(attempt: u64, server: String, ntfy: String) {
         return;
     }
     glib::MainContext::default().invoke(move || {
-        let win = ui().map(|u| u.window.clone());
-        gtk::UriLauncher::new(&url).launch(win.as_ref(), gio::Cancellable::NONE, |_| {});
+        let Some(ui) = ui().filter(|_| current(attempt)) else {
+            return;
+        };
+        if copy {
+            ui.window.clipboard().set_text(&url);
+            ui.toasts
+                .add_toast(adw::Toast::new("Login link copied to clipboard"));
+        } else {
+            gtk::UriLauncher::new(&url).launch(Some(&ui.window), gio::Cancellable::NONE, |_| {});
+        }
     });
     for _ in 0..600 {
         std::thread::sleep(std::time::Duration::from_secs(2));
