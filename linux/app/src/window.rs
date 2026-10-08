@@ -5,6 +5,7 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use todav_core::{Task, TaskPatch};
 
 /// Completed tasks shown in the "Done" expander, newest first.
@@ -27,6 +28,7 @@ struct Ui {
     server: adw::EntryRow,
     ntfy: adw::EntryRow,
     login: gtk::Button,
+    cancel_login: gtk::Button,
     last_error: RefCell<String>,
 }
 
@@ -219,9 +221,18 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         .build();
     login.add_css_class("suggested-action");
     login.add_css_class("pill");
+    let cancel_login = gtk::Button::builder()
+        .label("Cancel")
+        .halign(gtk::Align::Center)
+        .visible(false)
+        .build();
+    cancel_login.add_css_class("flat");
+    let buttons = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    buttons.append(&login);
+    buttons.append(&cancel_login);
     let login_box = gtk::Box::new(gtk::Orientation::Vertical, 24);
     login_box.append(&form);
-    login_box.append(&login);
+    login_box.append(&buttons);
     let status = adw::StatusPage::builder()
         .icon_name("checkbox-checked-symbolic")
         .title("Todav")
@@ -276,6 +287,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         server,
         ntfy,
         login,
+        cancel_login,
         last_error: RefCell::new(String::new()),
     });
     connect(&ui);
@@ -338,17 +350,39 @@ fn connect(ui: &Rc<Ui>) {
         let ntfy = ui.ntfy.text().trim().to_string();
         btn.set_sensitive(false);
         btn.set_label("Waiting for Browser…");
-        std::thread::spawn(move || login_thread(server, ntfy));
+        ui.cancel_login.set_visible(true);
+        let attempt = LOGIN_ATTEMPT.fetch_add(1, Ordering::SeqCst) + 1;
+        std::thread::spawn(move || login_thread(attempt, server, ntfy));
+    });
+
+    let weak = Rc::downgrade(ui);
+    ui.cancel_login.connect_clicked(move |_| {
+        LOGIN_ATTEMPT.fetch_add(1, Ordering::SeqCst); // the running attempt sees it is stale and stops
+        if let Some(ui) = weak.upgrade() {
+            reset_login(&ui);
+        }
     });
 }
 
+/// Bumped on every sign-in click and on cancel; a login thread only acts while its number is current.
+static LOGIN_ATTEMPT: AtomicU64 = AtomicU64::new(0);
+
+fn current(attempt: u64) -> bool {
+    LOGIN_ATTEMPT.load(Ordering::SeqCst) == attempt
+}
+
+fn reset_login(ui: &Ui) {
+    ui.login.set_sensitive(true);
+    ui.login.set_label("Sign In with Browser");
+    ui.cancel_login.set_visible(false);
+}
+
 /// Login Flow v2: open the browser, poll until the user approves, then store the app password.
-fn login_thread(server: String, ntfy: String) {
+fn login_thread(attempt: u64, server: String, ntfy: String) {
     let fail = |msg: String| {
         glib::MainContext::default().invoke(move || {
-            if let Some(ui) = ui() {
-                ui.login.set_sensitive(true);
-                ui.login.set_label("Sign In with Browser");
+            if let Some(ui) = ui().filter(|_| current(attempt)) {
+                reset_login(&ui);
                 ui.toasts.add_toast(adw::Toast::new(&msg));
             }
         })
@@ -358,16 +392,27 @@ fn login_thread(server: String, ntfy: String) {
         Err(e) => return fail(format!("Cannot start login: {e}")),
     };
     let url = flow.login_url.clone();
+    if !current(attempt) {
+        return;
+    }
     glib::MainContext::default().invoke(move || {
         let win = ui().map(|u| u.window.clone());
         gtk::UriLauncher::new(&url).launch(win.as_ref(), gio::Cancellable::NONE, |_| {});
     });
     for _ in 0..600 {
         std::thread::sleep(std::time::Duration::from_secs(2));
+        if !current(attempt) {
+            return;
+        }
         match todav_core::login_flow_poll(&flow) {
             Ok(None) => continue,
             Ok(Some(c)) => {
-                glib::MainContext::default().invoke(move || finish_login(c, ntfy));
+                // Checked again on the main thread: cancel may land while this is queued.
+                glib::MainContext::default().invoke(move || {
+                    if current(attempt) {
+                        finish_login(c, ntfy)
+                    }
+                });
                 return;
             }
             Err(e) => return fail(format!("Login failed: {e}")),
@@ -378,6 +423,7 @@ fn login_thread(server: String, ntfy: String) {
 
 fn finish_login(c: todav_core::Credentials, ntfy: String) {
     let Some(ui) = ui() else { return };
+    reset_login(&ui);
     if let Err(e) = crate::password_store(&c.server, &c.login_name, &c.app_password) {
         ui.toasts
             .add_toast(adw::Toast::new(&format!("Cannot save password: {e}")));
