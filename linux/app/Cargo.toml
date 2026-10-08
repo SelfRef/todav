@@ -1,0 +1,15 @@
+[package]
+name = "todav-linux"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "todav-linux"
+path = "src/main.rs"
+
+[dependencies]
+adw = { version = "0.9.2", package = "libadwaita", features = ["v1_6"] }
+gtk = { version = "0.11.5", package = "gtk4", features = ["v4_14"] }
+libsecret = "0.9.0"
+todav-core = { path = "../../core" }

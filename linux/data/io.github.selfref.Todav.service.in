@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=io.github.selfref.Todav
+Exec=@bindir@/todav-linux --gapplication-service

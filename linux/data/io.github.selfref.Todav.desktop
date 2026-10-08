@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Todav
+Comment=Tasks synced with Nextcloud
+Exec=todav-linux
+Icon=checkbox-checked-symbolic
+Terminal=false
+Type=Application
+Categories=Office;ProjectManagement;
+Keywords=todo;tasks;caldav;nextcloud;
+DBusActivatable=true
+StartupNotify=true

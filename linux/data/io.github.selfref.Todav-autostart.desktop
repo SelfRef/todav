@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Todav (background)
+Exec=todav-linux --gapplication-service
+Type=Application
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
