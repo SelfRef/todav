@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.todav" path="/org/gnome/shell/extensions/todav/">
+    <key name="pinned-list" type="s">
+      <default>''</default>
+      <summary>List shown in the panel (CalDAV href); empty = first list</summary>
+    </key>
+  </schema>
+</schemalist>

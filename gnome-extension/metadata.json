@@ -1,0 +1,8 @@
+{
+  "uuid": "todav@selfref.dev",
+  "name": "Todav",
+  "description": "Quick view of your Todav task list. Requires the Todav app.",
+  "shell-version": ["48", "49", "50", "51"],
+  "settings-schema": "org.gnome.shell.extensions.todav",
+  "url": "https://github.com/SelfRef/todav"
+}
