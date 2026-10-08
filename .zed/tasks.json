@@ -1,0 +1,66 @@
+// Run the Linux app straight from the workspace, without `make install`.
+// The app is single-instance: if another copy (installed or a previous run) owns
+// the bus name, a new launch just forwards to it. Quit it first with the task below.
+[
+  {
+    "label": "linux: run",
+    "command": "cargo run -p todav-linux",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "linux: run (release)",
+    "command": "cargo run --release -p todav-linux",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "linux: run as background service",
+    "command": "cargo run -p todav-linux -- --gapplication-service",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "linux: run with debug logs",
+    "command": "cargo run -p todav-linux",
+    "env": { "G_MESSAGES_DEBUG": "all", "RUST_BACKTRACE": "1" },
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "linux: quit running instance",
+    // --auto-start=no so this never D-Bus-activates an installed copy just to quit it.
+    "command": "busctl --user --auto-start=no call io.github.selfref.Todav /io/github/selfref/Todav org.gtk.Actions Activate 'sava{sv}' quit 0 0 || true",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "no_focus",
+    "hide": "on_success"
+  },
+  {
+    "label": "extension: link into GNOME Shell",
+    // Symlinks the source dir; changes load on the next shell start (log out/in on Wayland).
+    "command": "make -C gnome-extension link",
+    "use_new_terminal": false,
+    "reveal": "no_focus",
+    "hide": "on_success"
+  },
+  {
+    "label": "extension: run in nested shell",
+    // Separate session bus, so it uses the dev app build even if Todav is installed or running.
+    "command": "cargo build -p todav-linux && make -C gnome-extension nested",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "extension: follow shell log",
+    "command": "journalctl --user -f -o cat /usr/bin/gnome-shell",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  }
+]
