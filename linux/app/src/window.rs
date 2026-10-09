@@ -3,7 +3,7 @@
 use crate::{Event, core, request_sync};
 use adw::prelude::*;
 use gtk::{gio, glib};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,6 +25,9 @@ row.subtask-done label.title { text-decoration-line: line-through; opacity: 0.55
 /// Left margin per subtask level, in pixels.
 const INDENT: i32 = 24;
 
+/// Header and sidebar name for tasks without a category.
+const OTHER: &str = "Other";
+
 /// Completed tasks shown in the "Done" expander, newest first.
 const DONE_SHOWN: usize = 50;
 
@@ -36,8 +39,16 @@ struct Ui {
     sidebar: gtk::ListBox,
     cat_section: gtk::Box,
     cat_list: gtk::ListBox,
+    /// Category of each `cat_list` row; None is "Other" (no category).
+    cat_rows: RefCell<Vec<Option<String>>>,
     /// Category the task page is narrowed to, with the list it belongs to.
-    filter: RefCell<Option<(String, String)>>,
+    filter: RefCell<Option<(String, Option<String>)>>,
+    /// Categories created in the picker per list, shown until a task or the config has them.
+    new_cats: RefCell<Vec<(String, String)>>,
+    /// Picker selection to return to when "New Category…" is chosen.
+    cat_prev: Cell<u32>,
+    /// Set while refresh_tasks rewrites the picker, so its handler ignores the changes.
+    cat_busy: Cell<bool>,
     hrefs: RefCell<Vec<String>>,
     current: RefCell<Option<String>>,
     title: adw::WindowTitle,
@@ -199,7 +210,11 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         sidebar: get(&b, "sidebar"),
         cat_section: get(&b, "cat_section"),
         cat_list: get(&b, "cat_list"),
+        cat_rows: RefCell::new(Vec::new()),
         filter: RefCell::new(None),
+        new_cats: RefCell::new(Vec::new()),
+        cat_prev: Cell::new(0),
+        cat_busy: Cell::new(false),
         hrefs: RefCell::new(Vec::new()),
         current: RefCell::new(None),
         title: get(&b, "title"),
@@ -240,21 +255,37 @@ fn connect(ui: &Rc<Ui>) {
     let weak = Rc::downgrade(ui);
     ui.cat_list.connect_row_activated(move |list, row| {
         let Some(ui) = weak.upgrade() else { return };
-        let (Some(href), Some(name)) = (
+        let (Some(href), Some(cat)) = (
             ui.current.borrow().clone(),
-            row.child().and_downcast::<gtk::Label>().map(|l| l.label()),
+            ui.cat_rows.borrow().get(row.index() as usize).cloned(),
         ) else {
             return;
         };
-        let pick = (href, name.to_string());
+        let pick = (href, cat);
         let again = ui.filter.borrow().as_ref() == Some(&pick);
         if again {
             list.unselect_all();
         }
         *ui.filter.borrow_mut() = (!again).then_some(pick);
         ui.split.set_show_content(true);
-        // Rebuild outside the handler: refresh_tasks replaces this row.
         glib::idle_add_local_once(move || refresh_tasks(&ui));
+    });
+
+    // The picker's last item asks for a new category instead of being a choice.
+    let weak = Rc::downgrade(ui);
+    ui.cat.connect_selected_notify(move |dd| {
+        let Some(ui) = weak.upgrade() else { return };
+        if ui.cat_busy.get() {
+            return;
+        }
+        if dd.selected() + 1 == ui.cats.n_items() {
+            ui.cat_busy.set(true);
+            dd.set_selected(ui.cat_prev.get());
+            ui.cat_busy.set(false);
+            new_category_dialog(&ui);
+        } else {
+            ui.cat_prev.set(dd.selected());
+        }
     });
 
     let weak = Rc::downgrade(ui);
@@ -269,7 +300,7 @@ fn connect(ui: &Rc<Ui>) {
         }
         // With a category filter the picker is hidden and the filter decides.
         let cat = match ui.filter.borrow().clone() {
-            Some((_, c)) => Some(c),
+            Some((_, c)) => c,
             None => (ui.cat.selected() > 0)
                 .then(|| ui.cats.string(ui.cat.selected()).map(|s| s.to_string()))
                 .flatten(),
@@ -509,54 +540,77 @@ fn refresh_tasks(ui: &Rc<Ui>) {
         .into_iter()
         .map(|c| c.name)
         .collect();
-    for g in &groups {
-        if let Some(n) = &g.name
-            && !names.contains(n)
-        {
+    let fresh = ui.new_cats.borrow();
+    let fresh = fresh.iter().filter(|(h, _)| *h == href).map(|(_, n)| n);
+    for n in groups.iter().filter_map(|g| g.name.as_ref()).chain(fresh) {
+        if !names.contains(n) {
             names.push(n.clone());
         }
     }
-    let old = ui.cats.n_items();
     let refs: Vec<&str> = std::iter::once("No category")
         .chain(names.iter().map(String::as_str))
+        .chain(std::iter::once("New Category…"))
         .collect();
-    ui.cats.splice(0, old, &refs);
     let sel = selected
-        .and_then(|s| refs.iter().position(|r| *r == s))
+        .and_then(|s| refs[..refs.len() - 1].iter().position(|r| *r == s))
         .unwrap_or(0);
+    ui.cat_busy.set(true);
+    ui.cats.splice(0, ui.cats.n_items(), &refs);
     ui.cat.set_selected(sel as u32);
+    ui.cat_busy.set(false);
+    ui.cat_prev.set(sel as u32);
 
-    // Sidebar categories; the filter only survives while its list is shown and the category exists.
+    // Sidebar categories plus "Other"; rebuilt only when they change, so the selection holds.
+    let rows: Vec<Option<String>> = names
+        .iter()
+        .cloned()
+        .map(Some)
+        .chain((!names.is_empty()).then_some(None))
+        .collect();
+    if *ui.cat_rows.borrow() != rows {
+        ui.cat_list.remove_all();
+        for r in &rows {
+            let label = r.as_deref().unwrap_or(OTHER);
+            ui.cat_list
+                .append(&gtk::Label::builder().label(label).xalign(0.0).build());
+        }
+        *ui.cat_rows.borrow_mut() = rows;
+    }
+    ui.cat_section.set_visible(!names.is_empty());
+
+    // The filter only survives while its list is shown and its category is listed.
     let filter = ui
         .filter
         .borrow()
         .clone()
-        .filter(|(h, c)| *h == href && names.contains(c))
+        .filter(|(h, c)| *h == href && ui.cat_rows.borrow().contains(c))
         .map(|(_, c)| c);
     *ui.filter.borrow_mut() = filter.clone().map(|c| (href.clone(), c));
     ui.cat.set_visible(filter.is_none());
-    ui.cat_section.set_visible(!names.is_empty());
-    ui.cat_list.remove_all();
-    for (i, n) in names.iter().enumerate() {
-        ui.cat_list
-            .append(&gtk::Label::builder().label(n).xalign(0.0).build());
-        if filter.as_ref() == Some(n) {
-            ui.cat_list
-                .select_row(ui.cat_list.row_at_index(i as i32).as_ref());
-        }
+    let pos = filter
+        .as_ref()
+        .and_then(|f| ui.cat_rows.borrow().iter().position(|c| c == f));
+    match pos {
+        Some(i) => ui
+            .cat_list
+            .select_row(ui.cat_list.row_at_index(i as i32).as_ref()),
+        None => ui.cat_list.unselect_all(),
     }
-    let shown = |c: Option<&String>| filter.is_none() || c == filter.as_ref();
+    let shown = |c: Option<&String>| filter.as_ref().is_none_or(|f| c == f.as_ref());
     let groups: Vec<_> = groups
         .into_iter()
         .filter(|g| shown(g.name.as_ref()))
         .collect();
 
+    // A lone "Other" group (a list without categories) needs no header.
+    let titled = groups.iter().any(|g| g.name.is_some());
     for g in &groups {
-        let group = adw::PreferencesGroup::builder()
-            .title(glib::markup_escape_text(
-                g.name.as_deref().unwrap_or("Other"),
-            ))
-            .build();
+        let group = adw::PreferencesGroup::new();
+        if titled {
+            group.set_title(&glib::markup_escape_text(
+                g.name.as_deref().unwrap_or(OTHER),
+            ));
+        }
         for (root, subs) in trees(&g.tasks) {
             let adding = ui.adding.borrow().as_ref() == Some(&root.uid);
             if subs.is_empty() && !adding {
@@ -768,6 +822,31 @@ fn delete_button(t: &Task) -> gtk::Button {
         }
     });
     del
+}
+
+/// Ask for a category name; it joins this list's categories and becomes the picker's choice.
+fn new_category_dialog(ui: &Rc<Ui>) {
+    let Some(href) = ui.current.borrow().clone() else {
+        return;
+    };
+    let b = view!("new-category");
+    let dialog: adw::AlertDialog = get(&b, "dialog");
+    let name: adw::EntryRow = get(&b, "name");
+    let d = dialog.clone();
+    name.connect_changed(move |e| d.set_response_enabled("create", !e.text().trim().is_empty()));
+    let weak = Rc::downgrade(ui);
+    dialog.connect_response(Some("create"), move |_, _| {
+        let Some(ui) = weak.upgrade() else { return };
+        let name = name.text().trim().to_string();
+        ui.new_cats.borrow_mut().push((href.clone(), name.clone()));
+        refresh_tasks(&ui);
+        if let Some(i) =
+            (0..ui.cats.n_items()).find(|&i| ui.cats.string(i).as_deref() == Some(&name))
+        {
+            ui.cat.set_selected(i);
+        }
+    });
+    dialog.present(Some(&ui.window));
 }
 
 fn edit_dialog(ui: &Rc<Ui>, t: &Task) {
