@@ -602,8 +602,8 @@ fn refresh_tasks(ui: &Rc<Ui>) {
         .filter(|g| shown(g.name.as_ref()))
         .collect();
 
-    // A lone "Other" group (a list without categories) needs no header.
-    let titled = groups.iter().any(|g| g.name.is_some());
+    // A list without categories is one plain list; otherwise every group, "Other" too, has a header.
+    let titled = !names.is_empty();
     for g in &groups {
         let group = adw::PreferencesGroup::new();
         if titled {
