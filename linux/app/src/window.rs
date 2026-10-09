@@ -32,8 +32,8 @@ struct Ui {
     cats: gtk::StringList,
     cat: gtk::DropDown,
     groups: gtk::Box,
-    server: adw::EntryRow,
-    ntfy: adw::EntryRow,
+    server: (gtk::DropDown, adw::EntryRow),
+    ntfy: (gtk::DropDown, adw::EntryRow),
     login: adw::SplitButton,
     cancel_login: gtk::Button,
     last_error: RefCell<String>,
@@ -212,16 +212,9 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     split.set_content(Some(&content_page));
 
     // Login page
-    let server = adw::EntryRow::builder()
-        .title("Nextcloud server")
-        .text("https://")
-        .build();
-    let ntfy = adw::EntryRow::builder()
-        .title("ntfy server for push (optional)")
-        .build();
     let form = adw::PreferencesGroup::new();
-    form.add(&server);
-    form.add(&ntfy);
+    let server = url_row(&form, "Nextcloud server");
+    let ntfy = url_row(&form, "ntfy server for push (optional)");
     let login_menu = gio::Menu::new();
     login_menu.append(Some("Copy Login Link"), Some("win.copy-login"));
     let login = adw::SplitButton::builder()
@@ -386,10 +379,35 @@ fn connect(ui: &Rc<Ui>) {
     });
 }
 
+/// A host entry with an https/http picker as its prefix, added to `form`.
+fn url_row(form: &adw::PreferencesGroup, title: &str) -> (gtk::DropDown, adw::EntryRow) {
+    let scheme = gtk::DropDown::from_strings(&["https", "http"]);
+    scheme.set_valign(gtk::Align::Center);
+    scheme.add_css_class("flat");
+    let row = adw::EntryRow::builder().title(title).build();
+    row.add_prefix(&scheme);
+    form.add(&row);
+    (scheme, row)
+}
+
+/// Full URL from a `url_row`; empty stays empty, a typed scheme wins over the picker.
+fn url_text((scheme, row): &(gtk::DropDown, adw::EntryRow)) -> String {
+    let host = row.text().trim().to_string();
+    if host.is_empty() || host.contains("://") {
+        return host;
+    }
+    let scheme = if scheme.selected() == 0 {
+        "https"
+    } else {
+        "http"
+    };
+    format!("{scheme}://{host}")
+}
+
 /// Start Login Flow v2; `copy` puts the login link on the clipboard instead of opening the browser.
 fn start_login(ui: &Ui, copy: bool) {
-    let server = ui.server.text().trim().to_string();
-    let ntfy = ui.ntfy.text().trim().to_string();
+    let server = url_text(&ui.server);
+    let ntfy = url_text(&ui.ntfy);
     ui.login.set_sensitive(false);
     ui.login.set_label(if copy {
         "Waiting for Sign-In…"
