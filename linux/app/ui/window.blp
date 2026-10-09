@@ -97,8 +97,49 @@ Adw.ApplicationWindow window {
               content: Gtk.ScrolledWindow {
                 vexpand: true;
 
-                Gtk.ListBox sidebar {
-                  styles ["navigation-sidebar"]
+                Gtk.Box {
+                  orientation: vertical;
+
+                  Gtk.ListBox sidebar {
+                    styles ["navigation-sidebar"]
+                  }
+
+                  // Filled per list; hidden when the list has no categories.
+                  Gtk.Box cat_section {
+                    orientation: vertical;
+                    visible: false;
+                    margin-top: 6;
+
+                    Gtk.ToggleButton cat_toggle {
+                      active: true;
+                      margin-start: 6;
+                      margin-end: 6;
+                      styles ["flat", "cat-toggle"]
+
+                      Gtk.Box {
+                        spacing: 6;
+
+                        Gtk.Label {
+                          label: "Categories";
+                          xalign: 0;
+                          hexpand: true;
+                          styles ["heading"]
+                        }
+
+                        Gtk.Image {
+                          icon-name: "pan-down-symbolic";
+                        }
+                      }
+                    }
+
+                    Gtk.Revealer {
+                      reveal-child: bind cat_toggle.active;
+
+                      Gtk.ListBox cat_list {
+                        styles ["navigation-sidebar"]
+                      }
+                    }
+                  }
                 }
               };
             };

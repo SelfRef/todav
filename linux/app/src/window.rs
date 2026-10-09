@@ -9,10 +9,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use todav_core::{Task, TaskPatch};
 
 /// Libadwaita only styles plain buttons as pills; round the ends of the sign-in split button to match.
+/// The category section header turns its arrow like an expander row, without a "pressed" look.
 const CSS: &str = "
 splitbutton.pill { border-radius: 9999px; }
 splitbutton.pill > button { padding: 10px 20px 10px 32px; border-radius: 9999px 0 0 9999px; }
 splitbutton.pill > menubutton > button { padding: 10px 16px 10px 12px; border-radius: 0 9999px 9999px 0; }
+.cat-toggle image { transition: -gtk-icon-transform 200ms ease; }
+.cat-toggle:not(:checked) image { -gtk-icon-transform: rotate(-90deg); }
+.cat-toggle:checked:not(:hover) { background: none; }
 ";
 
 /// Completed tasks shown in the "Done" expander, newest first.
@@ -24,6 +28,10 @@ struct Ui {
     stack: gtk::Stack,
     split: adw::NavigationSplitView,
     sidebar: gtk::ListBox,
+    cat_section: gtk::Box,
+    cat_list: gtk::ListBox,
+    /// Category the task page is narrowed to, with the list it belongs to.
+    filter: RefCell<Option<(String, String)>>,
     hrefs: RefCell<Vec<String>>,
     current: RefCell<Option<String>>,
     title: adw::WindowTitle,
@@ -177,6 +185,9 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         stack: get(&b, "stack"),
         split: get(&b, "split"),
         sidebar: get(&b, "sidebar"),
+        cat_section: get(&b, "cat_section"),
+        cat_list: get(&b, "cat_list"),
+        filter: RefCell::new(None),
         hrefs: RefCell::new(Vec::new()),
         current: RefCell::new(None),
         title: get(&b, "title"),
@@ -210,6 +221,27 @@ fn connect(ui: &Rc<Ui>) {
         ui.split.set_show_content(true);
     });
 
+    // Clicking the selected category clears the filter.
+    let weak = Rc::downgrade(ui);
+    ui.cat_list.connect_row_activated(move |list, row| {
+        let Some(ui) = weak.upgrade() else { return };
+        let (Some(href), Some(name)) = (
+            ui.current.borrow().clone(),
+            row.child().and_downcast::<gtk::Label>().map(|l| l.label()),
+        ) else {
+            return;
+        };
+        let pick = (href, name.to_string());
+        let again = ui.filter.borrow().as_ref() == Some(&pick);
+        if again {
+            list.unselect_all();
+        }
+        *ui.filter.borrow_mut() = (!again).then_some(pick);
+        ui.split.set_show_content(true);
+        // Rebuild outside the handler: refresh_tasks replaces this row.
+        glib::idle_add_local_once(move || refresh_tasks(&ui));
+    });
+
     let weak = Rc::downgrade(ui);
     ui.entry.connect_activate(move |entry| {
         let Some(ui) = weak.upgrade() else { return };
@@ -220,9 +252,13 @@ fn connect(ui: &Rc<Ui>) {
         if text.is_empty() {
             return;
         }
-        let cat = (ui.cat.selected() > 0)
-            .then(|| ui.cats.string(ui.cat.selected()).map(|s| s.to_string()))
-            .flatten();
+        // With a category filter the picker is hidden and the filter decides.
+        let cat = match ui.filter.borrow().clone() {
+            Some((_, c)) => Some(c),
+            None => (ui.cat.selected() > 0)
+                .then(|| ui.cats.string(ui.cat.selected()).map(|s| s.to_string()))
+                .flatten(),
+        };
         match core().add_task(list, text, cat, None) {
             Ok(_) => {
                 entry.set_text("");
@@ -475,6 +511,31 @@ fn refresh_tasks(ui: &Rc<Ui>) {
         .unwrap_or(0);
     ui.cat.set_selected(sel as u32);
 
+    // Sidebar categories; the filter only survives while its list is shown and the category exists.
+    let filter = ui
+        .filter
+        .borrow()
+        .clone()
+        .filter(|(h, c)| *h == href && names.contains(c))
+        .map(|(_, c)| c);
+    *ui.filter.borrow_mut() = filter.clone().map(|c| (href.clone(), c));
+    ui.cat.set_visible(filter.is_none());
+    ui.cat_section.set_visible(!names.is_empty());
+    ui.cat_list.remove_all();
+    for (i, n) in names.iter().enumerate() {
+        ui.cat_list
+            .append(&gtk::Label::builder().label(n).xalign(0.0).build());
+        if filter.as_ref() == Some(n) {
+            ui.cat_list
+                .select_row(ui.cat_list.row_at_index(i as i32).as_ref());
+        }
+    }
+    let shown = |c: Option<&String>| filter.is_none() || c == filter.as_ref();
+    let groups: Vec<_> = groups
+        .into_iter()
+        .filter(|g| shown(g.name.as_ref()))
+        .collect();
+
     for g in &groups {
         let group = adw::PreferencesGroup::builder()
             .title(glib::markup_escape_text(
@@ -490,7 +551,7 @@ fn refresh_tasks(ui: &Rc<Ui>) {
     let mut done: Vec<Task> = core()
         .tasks(href, true)
         .into_iter()
-        .filter(|t| t.done)
+        .filter(|t| t.done && shown(t.category.as_ref()))
         .collect();
     if !done.is_empty() {
         done.sort_by_key(|t| std::cmp::Reverse(t.completed_at));
