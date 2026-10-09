@@ -150,11 +150,42 @@ impl Client {
     }
 
     /// Open tasks grouped by category: configured categories first (in order), then unknown
-    /// categories alphabetically, then uncategorised. Subtasks follow their top-level ancestor.
+    /// categories alphabetically, then uncategorised. Subtasks follow their top-level ancestor,
+    /// done ones included while that ancestor is open.
     pub fn grouped(&self, list_href: String) -> Vec<CategoryGroup> {
         let meta = self.categories(list_href.clone());
-        group(self.tasks(list_href, false), &meta)
+        group(split_done(self.tasks(list_href, true)).0, &meta)
     }
+
+    /// Done tasks not shown by `grouped`: done top-level tasks and everything done below them.
+    pub fn finished(&self, list_href: String) -> Vec<Task> {
+        split_done(self.tasks(list_href, true)).1
+    }
+}
+
+/// (open tree, finished): a done task stays in the open tree while its parent does.
+fn split_done(tasks: Vec<Task>) -> (Vec<Task>, Vec<Task>) {
+    let by_uid: HashMap<&str, &Task> = tasks.iter().map(|t| (t.uid.as_str(), t)).collect();
+    let in_tree = |t: &Task| {
+        let mut t = t;
+        for _ in 0..=by_uid.len() {
+            // bounded: RELATED-TO from a server can form a cycle
+            if !t.done {
+                return true;
+            }
+            match t.parent_uid.as_deref().and_then(|p| by_uid.get(p)) {
+                Some(p) => t = p,
+                None => return false,
+            }
+        }
+        false
+    };
+    let keep: HashSet<String> = tasks
+        .iter()
+        .filter(|t| in_tree(t))
+        .map(|t| t.uid.clone())
+        .collect();
+    tasks.into_iter().partition(|t| keep.contains(&t.uid))
 }
 
 fn group(tasks: Vec<Task>, meta: &[CategoryMeta]) -> Vec<CategoryGroup> {
@@ -276,5 +307,30 @@ mod tests {
             ]
         );
         assert_eq!(g[0].icon.as_deref(), Some("house"));
+    }
+
+    #[test]
+    fn done_subtasks_stay_under_open_parents() {
+        let done = |uid, parent| Task {
+            done: true,
+            ..task(uid, None, parent)
+        };
+        let tasks = vec![
+            task("root", None, None),
+            done("sub", Some("root")),
+            done("subsub", Some("sub")),
+            done("closed", None),
+            done("closed_sub", Some("closed")),
+            task("open_under_closed", None, Some("closed")),
+            done("loop_a", Some("loop_b")),
+            done("loop_b", Some("loop_a")),
+        ];
+        let (tree, finished) = split_done(tasks);
+        let uids = |v: &[Task]| v.iter().map(|t| t.uid.clone()).collect::<Vec<_>>();
+        assert_eq!(uids(&tree), ["root", "sub", "subsub", "open_under_closed"]);
+        assert_eq!(
+            uids(&finished),
+            ["closed", "closed_sub", "loop_a", "loop_b"]
+        );
     }
 }
