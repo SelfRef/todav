@@ -139,167 +139,48 @@ pub fn on_event(ev: &Event) {
     }
 }
 
+/// Loads a view compiled from `ui/<name>.blp` by build.rs.
+macro_rules! view {
+    ($name:literal) => {
+        gtk::Builder::from_string(include_str!(concat!(env!("OUT_DIR"), "/", $name, ".ui")))
+    };
+}
+
+fn get<T: IsA<glib::Object>>(b: &gtk::Builder, id: &str) -> T {
+    b.object(id).unwrap_or_else(|| panic!("no `{id}` in view"))
+}
+
 fn build(app: &adw::Application) -> Rc<Ui> {
-    // Sidebar
-    let sidebar = gtk::ListBox::new();
-    sidebar.add_css_class("navigation-sidebar");
-    let menu = gio::Menu::new();
-    menu.append(Some("Sign Out"), Some("app.logout"));
-    menu.append(Some("Quit"), Some("app.quit"));
-    let menu_btn = gtk::MenuButton::builder()
-        .icon_name("open-menu-symbolic")
-        .menu_model(&menu)
-        .build();
-    let side_header = adw::HeaderBar::new();
-    side_header.pack_end(&menu_btn);
-    let side_view = adw::ToolbarView::new();
-    side_view.add_top_bar(&side_header);
-    side_view.set_content(Some(
-        &gtk::ScrolledWindow::builder()
-            .child(&sidebar)
-            .vexpand(true)
-            .build(),
-    ));
-    let side_page = adw::NavigationPage::new(&side_view, "Todav");
-
-    // Task page
-    let title = adw::WindowTitle::new("", "");
-    let spinner = adw::Spinner::new();
-    spinner.set_visible(false);
-    let refresh = gtk::Button::builder()
-        .icon_name("view-refresh-symbolic")
-        .tooltip_text("Sync (F5)")
-        .action_name("app.sync")
-        .build();
-    let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&title));
-    header.pack_end(&refresh);
-    header.pack_end(&spinner);
-
-    let entry = gtk::Entry::builder()
-        .placeholder_text("Add a task")
-        .hexpand(true)
-        .build();
-    let cats = gtk::StringList::new(&["No category"]);
-    let cat = gtk::DropDown::builder()
-        .model(&cats)
-        .tooltip_text("Category (Ctrl+K)")
-        .build();
-    let add_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    add_row.append(&entry);
-    add_row.append(&cat);
-    let groups = gtk::Box::new(gtk::Orientation::Vertical, 18);
-    let body = gtk::Box::new(gtk::Orientation::Vertical, 18);
-    body.set_margin_top(12);
-    body.set_margin_bottom(24);
-    body.set_margin_start(12);
-    body.set_margin_end(12);
-    body.append(&add_row);
-    body.append(&groups);
-    let clamp = adw::Clamp::builder().maximum_size(720).child(&body).build();
-    let content_view = adw::ToolbarView::new();
-    content_view.add_top_bar(&header);
-    content_view.set_content(Some(
-        &gtk::ScrolledWindow::builder()
-            .child(&clamp)
-            .vexpand(true)
-            .build(),
-    ));
-    let content_page = adw::NavigationPage::new(&content_view, "Tasks");
-
-    let split = adw::NavigationSplitView::new();
-    split.set_sidebar(Some(&side_page));
-    split.set_content(Some(&content_page));
-
-    // Login page
-    let form = adw::PreferencesGroup::new();
-    let server = url_row(&form, "Nextcloud server");
-    let ntfy = url_row(&form, "ntfy server for push (optional)");
-    let login_menu = gio::Menu::new();
-    login_menu.append(Some("Copy Login Link"), Some("win.copy-login"));
-    let login = adw::SplitButton::builder()
-        .label("Sign In with Browser")
-        .menu_model(&login_menu)
-        .dropdown_tooltip("More Sign-In Options")
-        .halign(gtk::Align::Center)
-        .build();
-    login.add_css_class("suggested-action");
-    login.add_css_class("pill");
-    let cancel_login = gtk::Button::builder()
-        .label("Cancel")
-        .halign(gtk::Align::Center)
-        .visible(false)
-        .build();
-    cancel_login.add_css_class("flat");
-    let buttons = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    buttons.append(&login);
-    buttons.append(&cancel_login);
-    let login_box = gtk::Box::new(gtk::Orientation::Vertical, 24);
-    login_box.append(&form);
-    login_box.append(&buttons);
-    let status = adw::StatusPage::builder()
-        .icon_name("checkbox-checked-symbolic")
-        .title("Todav")
-        .description("Tasks synced with your Nextcloud")
-        .child(
-            &adw::Clamp::builder()
-                .maximum_size(420)
-                .child(&login_box)
-                .build(),
-        )
-        .build();
-    let login_view = adw::ToolbarView::new();
-    login_view.add_top_bar(&adw::HeaderBar::new());
-    login_view.set_content(Some(&status));
-
-    let stack = gtk::Stack::new();
-    stack.add_named(&login_view, Some("login"));
-    stack.add_named(&split, Some("main"));
-    let toasts = adw::ToastOverlay::new();
-    toasts.set_child(Some(&stack));
+    let b = view!("window");
+    let window: adw::ApplicationWindow = get(&b, "window");
+    window.set_application(Some(app));
 
     let css = gtk::CssProvider::new();
     css.load_from_string(CSS);
     gtk::style_context_add_provider_for_display(
-        &login.display(),
+        &WidgetExt::display(&window),
         &css,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
 
-    let window = adw::ApplicationWindow::builder()
-        .application(app)
-        .title("Todav")
-        .default_width(900)
-        .default_height(650)
-        .content(&toasts)
-        .hide_on_close(true)
-        .build();
-    let bp = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
-        adw::BreakpointConditionLengthType::MaxWidth,
-        600.0,
-        adw::LengthUnit::Sp,
-    ));
-    bp.add_setter(&split, "collapsed", Some(&true.to_value()));
-    window.add_breakpoint(bp);
-
     let ui = Rc::new(Ui {
         window,
-        toasts,
-        stack,
-        split,
-        sidebar,
+        toasts: get(&b, "toasts"),
+        stack: get(&b, "stack"),
+        split: get(&b, "split"),
+        sidebar: get(&b, "sidebar"),
         hrefs: RefCell::new(Vec::new()),
         current: RefCell::new(None),
-        title,
-        spinner,
-        entry,
-        cats,
-        cat,
-        groups,
-        server,
-        ntfy,
-        login,
-        cancel_login,
+        title: get(&b, "title"),
+        spinner: get(&b, "spinner"),
+        entry: get(&b, "entry"),
+        cats: get(&b, "cats"),
+        cat: get(&b, "cat"),
+        groups: get(&b, "groups"),
+        server: (get(&b, "server_scheme"), get(&b, "server")),
+        ntfy: (get(&b, "ntfy_scheme"), get(&b, "ntfy")),
+        login: get(&b, "login"),
+        cancel_login: get(&b, "cancel_login"),
         last_error: RefCell::new(String::new()),
     });
     connect(&ui);
@@ -343,18 +224,6 @@ fn connect(ui: &Rc<Ui>) {
         }
     });
 
-    // Ctrl+K opens the category picker.
-    let keys = gtk::ShortcutController::new();
-    let cat = ui.cat.clone();
-    keys.add_shortcut(gtk::Shortcut::new(
-        gtk::ShortcutTrigger::parse_string("<Control>k"),
-        Some(gtk::CallbackAction::new(move |_, _| {
-            cat.activate();
-            glib::Propagation::Stop
-        })),
-    ));
-    ui.window.add_controller(keys);
-
     let weak = Rc::downgrade(ui);
     ui.login.connect_clicked(move |_| {
         if let Some(ui) = weak.upgrade() {
@@ -379,18 +248,7 @@ fn connect(ui: &Rc<Ui>) {
     });
 }
 
-/// A host entry with an https/http picker as its prefix, added to `form`.
-fn url_row(form: &adw::PreferencesGroup, title: &str) -> (gtk::DropDown, adw::EntryRow) {
-    let scheme = gtk::DropDown::from_strings(&["https", "http"]);
-    scheme.set_valign(gtk::Align::Center);
-    scheme.add_css_class("flat");
-    let row = adw::EntryRow::builder().title(title).build();
-    row.add_prefix(&scheme);
-    form.add(&row);
-    (scheme, row)
-}
-
-/// Full URL from a `url_row`; empty stays empty, a typed scheme wins over the picker.
+/// Full URL from a scheme picker and host entry; empty stays empty, a typed scheme wins over the picker.
 fn url_text((scheme, row): &(gtk::DropDown, adw::EntryRow)) -> String {
     let host = row.text().trim().to_string();
     if host.is_empty() || host.contains("://") {
@@ -687,29 +545,14 @@ fn task_row(ui: &Rc<Ui>, t: &Task) -> adw::ActionRow {
 }
 
 fn edit_dialog(ui: &Rc<Ui>, t: &Task) {
-    let summary = adw::EntryRow::builder()
-        .title("Title")
-        .text(&t.summary)
-        .build();
-    let category = adw::EntryRow::builder()
-        .title("Category")
-        .text(t.category.as_deref().unwrap_or_default())
-        .build();
-    let description = adw::EntryRow::builder()
-        .title("Note")
-        .text(t.description.as_deref().unwrap_or_default())
-        .build();
-    let form = adw::PreferencesGroup::new();
-    form.add(&summary);
-    form.add(&category);
-    form.add(&description);
-    let dialog = adw::AlertDialog::builder()
-        .heading("Edit Task")
-        .extra_child(&form)
-        .build();
-    dialog.add_responses(&[("cancel", "Cancel"), ("save", "Save")]);
-    dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some("save"));
+    let b = view!("edit-dialog");
+    let dialog: adw::AlertDialog = get(&b, "dialog");
+    let summary: adw::EntryRow = get(&b, "summary");
+    let category: adw::EntryRow = get(&b, "category");
+    let description: adw::EntryRow = get(&b, "description");
+    summary.set_text(&t.summary);
+    category.set_text(t.category.as_deref().unwrap_or_default());
+    description.set_text(t.description.as_deref().unwrap_or_default());
     let task = t.clone();
     dialog.connect_response(Some("save"), move |_, _| {
         // Only send what changed: a one-line entry would flatten a multi-line note.

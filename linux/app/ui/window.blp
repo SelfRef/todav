@@ -1,0 +1,196 @@
+using Gtk 4.0;
+using Adw 1;
+
+Adw.ApplicationWindow window {
+  title: "Todav";
+  default-width: 900;
+  default-height: 650;
+  hide-on-close: true;
+
+  content: Adw.ToastOverlay toasts {
+    Gtk.Stack stack {
+      Gtk.StackPage {
+        name: "login";
+
+        child: Adw.ToolbarView {
+          [top]
+          Adw.HeaderBar {}
+
+          content: Adw.StatusPage {
+            icon-name: "checkbox-checked-symbolic";
+            title: "Todav";
+            description: "Tasks synced with your Nextcloud";
+
+            Adw.Clamp {
+              maximum-size: 420;
+
+              Gtk.Box {
+                orientation: vertical;
+                spacing: 24;
+
+                Adw.PreferencesGroup {
+                  Adw.EntryRow server {
+                    title: "Nextcloud server";
+
+                    [prefix]
+                    Gtk.DropDown server_scheme {
+                      valign: center;
+                      model: Gtk.StringList { strings ["https", "http"] };
+                      styles ["flat"]
+                    }
+                  }
+
+                  Adw.EntryRow ntfy {
+                    title: "ntfy server for push (optional)";
+
+                    [prefix]
+                    Gtk.DropDown ntfy_scheme {
+                      valign: center;
+                      model: Gtk.StringList { strings ["https", "http"] };
+                      styles ["flat"]
+                    }
+                  }
+                }
+
+                Gtk.Box {
+                  orientation: vertical;
+                  spacing: 6;
+
+                  Adw.SplitButton login {
+                    label: "Sign In with Browser";
+                    menu-model: login_menu;
+                    dropdown-tooltip: "More Sign-In Options";
+                    halign: center;
+                    styles ["suggested-action", "pill"]
+                  }
+
+                  Gtk.Button cancel_login {
+                    label: "Cancel";
+                    halign: center;
+                    visible: false;
+                    styles ["flat"]
+                  }
+                }
+              }
+            }
+          };
+        };
+      }
+
+      Gtk.StackPage {
+        name: "main";
+
+        child: Adw.NavigationSplitView split {
+          sidebar: Adw.NavigationPage {
+            title: "Todav";
+
+            child: Adw.ToolbarView {
+              [top]
+              Adw.HeaderBar {
+                [end]
+                Gtk.MenuButton {
+                  icon-name: "open-menu-symbolic";
+                  menu-model: main_menu;
+                }
+              }
+
+              content: Gtk.ScrolledWindow {
+                vexpand: true;
+
+                Gtk.ListBox sidebar {
+                  styles ["navigation-sidebar"]
+                }
+              };
+            };
+          };
+
+          content: Adw.NavigationPage {
+            title: "Tasks";
+
+            child: Adw.ToolbarView {
+              [top]
+              Adw.HeaderBar {
+                title-widget: Adw.WindowTitle title {};
+
+                [end]
+                Gtk.Button {
+                  icon-name: "view-refresh-symbolic";
+                  tooltip-text: "Sync (F5)";
+                  action-name: "app.sync";
+                }
+
+                [end]
+                Adw.Spinner spinner {
+                  visible: false;
+                }
+              }
+
+              content: Gtk.ScrolledWindow {
+                vexpand: true;
+
+                Adw.Clamp {
+                  maximum-size: 720;
+
+                  Gtk.Box {
+                    orientation: vertical;
+                    spacing: 18;
+                    margin-top: 12;
+                    margin-bottom: 24;
+                    margin-start: 12;
+                    margin-end: 12;
+
+                    Gtk.Box {
+                      spacing: 6;
+
+                      Gtk.Entry entry {
+                        placeholder-text: "Add a task";
+                        hexpand: true;
+                      }
+
+                      Gtk.DropDown cat {
+                        tooltip-text: "Category (Ctrl+K)";
+                        model: Gtk.StringList cats { strings ["No category"] };
+
+                        // Ctrl+K opens the category picker from anywhere in the window.
+                        Gtk.ShortcutController {
+                          scope: global;
+
+                          Gtk.Shortcut {
+                            trigger: "<Control>k";
+                            action: "activate";
+                          }
+                        }
+                      }
+                    }
+
+                    Gtk.Box groups {
+                      orientation: vertical;
+                      spacing: 18;
+                    }
+                  }
+                }
+              };
+            };
+          };
+        };
+      }
+    }
+  };
+
+  Adw.Breakpoint {
+    condition ("max-width: 600sp")
+
+    setters {
+      split.collapsed: true;
+    }
+  }
+}
+
+menu main_menu {
+  item ("Sign Out", "app.logout")
+  item ("Quit", "app.quit")
+}
+
+menu login_menu {
+  item ("Copy Login Link", "win.copy-login")
+}

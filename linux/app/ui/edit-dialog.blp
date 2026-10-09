@@ -1,0 +1,26 @@
+using Gtk 4.0;
+using Adw 1;
+
+Adw.AlertDialog dialog {
+  heading: "Edit Task";
+  default-response: "save";
+
+  extra-child: Adw.PreferencesGroup {
+    Adw.EntryRow summary {
+      title: "Title";
+    }
+
+    Adw.EntryRow category {
+      title: "Category";
+    }
+
+    Adw.EntryRow description {
+      title: "Note";
+    }
+  };
+
+  responses [
+    cancel: "Cancel",
+    save: "Save" suggested,
+  ]
+}
