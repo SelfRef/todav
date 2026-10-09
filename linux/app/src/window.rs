@@ -580,10 +580,30 @@ fn refresh_tasks(ui: &Rc<Ui>) {
         .collect();
     if *ui.cat_rows.borrow() != rows {
         ui.cat_list.remove_all();
-        for r in &rows {
+        for (i, r) in rows.iter().enumerate() {
             let label = r.as_deref().unwrap_or(OTHER);
             ui.cat_list
                 .append(&gtk::Label::builder().label(label).xalign(0.0).build());
+            // Dropping a task here moves it into this category.
+            let drop = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
+            let weak = Rc::downgrade(ui);
+            drop.connect_accept(move |_, _| {
+                weak.upgrade()
+                    .is_some_and(|ui| ui.dragging.borrow().is_some())
+            });
+            let (weak, cat) = (Rc::downgrade(ui), r.clone());
+            drop.connect_drop(move |_, _, _, _| {
+                let Some((d, ds)) = weak.upgrade().and_then(|ui| ui.dragging.take()) else {
+                    return false;
+                };
+                if let Err(e) = drop_on_category(&d, &ds, cat.clone()) {
+                    toast(&e.to_string());
+                }
+                true
+            });
+            if let Some(row) = ui.cat_list.row_at_index(i as i32) {
+                row.add_controller(drop);
+            }
         }
         *ui.cat_rows.borrow_mut() = rows;
     }
@@ -726,14 +746,16 @@ fn task_row(ui: &Rc<Ui>, t: &Task, indent: usize, slot: Option<Slot>) -> adw::Ac
     if let Some(d) = subtitle(t) {
         row.set_subtitle(d);
     }
-    if let Some(tag) = tag(ui, t) {
+    // Subtasks have no category of their own: the top-level task's decides.
+    let sub = indent > 0;
+    if let Some(tag) = tag(ui, t).filter(|_| !sub) {
         row.add_suffix(&tag);
     }
     row.add_suffix(&delete_button(t));
     let (weak, task) = (Rc::downgrade(ui), t.clone());
     row.connect_activated(move |_| {
         if let Some(ui) = weak.upgrade() {
-            edit_dialog(&ui, &task);
+            edit_dialog(&ui, &task, sub);
         }
     });
     row
@@ -781,7 +803,7 @@ fn tree_row(
     let (weak, task) = (Rc::downgrade(ui), root.clone());
     edit.connect_clicked(move |_| {
         if let Some(ui) = weak.upgrade() {
-            edit_dialog(&ui, &task);
+            edit_dialog(&ui, &task, false);
         }
     });
     row.add_suffix(&edit);
@@ -824,8 +846,7 @@ fn tree_row(
             return;
         }
         let parent = Some(root.uid.clone());
-        let (list, cat) = (root.list_href.clone(), root.category.clone());
-        match core().add_task(list, text, cat, parent, start) {
+        match core().add_task(root.list_href.clone(), text, None, parent, start) {
             Ok(_) => {
                 e.set_text("");
                 *ui.focus_sub.borrow_mut() = Some(root.uid.clone()); // keep typing after the rebuild
@@ -876,7 +897,7 @@ fn connect_dnd(
 ) {
     let drag = gtk::DragSource::new();
     drag.set_actions(gtk::gdk::DragAction::MOVE);
-    let (weak, task, s) = (Rc::downgrade(ui), t.clone(), slot.clone());
+    let (weak, task) = (Rc::downgrade(ui), t.clone());
     drag.connect_prepare(move |src, x, y| {
         // Without a handle the whole row drags, except from the "Add subtask" entry inside it.
         let picked = src
@@ -885,12 +906,16 @@ fn connect_dnd(
         if picked.is_some_and(|p| p.ancestor(adw::EntryRow::static_type()).is_some()) {
             return None;
         }
-        let ui = weak.upgrade()?;
-        *ui.dragging.borrow_mut() = Some((task.clone(), s.clone()));
         Some(gtk::gdk::ContentProvider::for_value(&task.uid.to_value()))
     });
+    // Recorded on begin, not prepare: a subtask's row sits inside its parent's expander, and
+    // GTK prepares the parent's source too even though only the subtask's drag starts.
     let r = row.clone().upcast::<gtk::Widget>();
+    let (task, s) = (t.clone(), slot.clone());
     drag.connect_drag_begin(move |src, _| {
+        if let Some(ui) = weak.upgrade() {
+            *ui.dragging.borrow_mut() = Some((task.clone(), s.clone()));
+        }
         src.set_icon(Some(&gtk::WidgetPaintable::new(Some(&r))), 0, 0);
     });
     let weak = Rc::downgrade(ui);
@@ -953,30 +978,31 @@ fn connect_dnd(
     row.add_controller(drop);
 }
 
-/// Top-level tasks move within and between groups (changing category); subtasks only among
-/// their siblings. Reordering only means something in manual order.
+/// Top-level tasks move within and between groups (changing category); subtasks among their
+/// siblings, or out to the top level. Reordering only means something in manual order.
 fn can_drop(d: &Task, ds: &Slot, t: &Task, ts: &Slot) -> bool {
     let order = crate::settings::order();
     if d.uid == t.uid {
         return false;
     }
-    if ds.root && ts.root {
-        return ds.group != ts.group || order.tasks == Sort::Manual;
+    if ts.root {
+        // A subtask dropped among top-level tasks is promoted into that group.
+        return !ds.root || ds.group != ts.group || order.tasks == Sort::Manual;
     }
-    !ds.root && !ts.root && d.parent_uid == t.parent_uid && order.subtasks == Sort::Manual
+    !ds.root && d.parent_uid == t.parent_uid && order.subtasks == Sort::Manual
 }
 
 /// Move dragged task `d` above or below target `t`.
 fn drop_task(d: &Task, ds: &Slot, t: &Task, ts: &Slot, above: bool) -> todav_core::Result<()> {
     let order = crate::settings::order();
-    if ds.root && ds.group != ts.group {
-        let patch = TaskPatch {
-            category: Some(ts.group.clone().unwrap_or_default()),
-            ..Default::default()
-        };
-        core().update_task(d.uid.clone(), patch)?;
+    let promote = !ds.root && ts.root;
+    if promote {
+        core().promote(d.uid.clone())?;
     }
-    let sort = if ds.root { order.tasks } else { order.subtasks };
+    if ts.root && (promote || ds.group != ts.group) {
+        set_category(&d.uid, ts.group.clone())?;
+    }
+    let sort = if ts.root { order.tasks } else { order.subtasks };
     let before = if above {
         Some(t.uid.clone())
     } else {
@@ -985,6 +1011,38 @@ fn drop_task(d: &Task, ds: &Slot, t: &Task, ts: &Slot, above: bool) -> todav_cor
     // Dropping right below the task above it leaves `d` where it is.
     if sort == Sort::Manual && before.as_ref() != Some(&d.uid) {
         core().reorder(d.uid.clone(), before)?;
+    }
+    request_sync();
+    Ok(())
+}
+
+fn set_category(uid: &str, category: Option<String>) -> todav_core::Result<()> {
+    let patch = TaskPatch {
+        category: Some(category.unwrap_or_default()),
+        ..Default::default()
+    };
+    core().update_task(uid.into(), patch)
+}
+
+/// A task dropped on a sidebar category: into that category (a subtask becomes top-level),
+/// first or last in it as new tasks would be.
+fn drop_on_category(d: &Task, ds: &Slot, category: Option<String>) -> todav_core::Result<()> {
+    if !ds.root {
+        core().promote(d.uid.clone())?;
+    }
+    set_category(&d.uid, category)?;
+    let order = crate::settings::order();
+    if order.tasks == Sort::Manual {
+        // Before every task of the list puts it first in its category too.
+        let first = core()
+            .tasks(d.list_href.clone(), true)
+            .first()
+            .map(|t| t.uid.clone());
+        match first {
+            _ if !order.task_start => core().reorder(d.uid.clone(), None)?,
+            Some(f) if f != d.uid => core().reorder(d.uid.clone(), Some(f))?,
+            _ => {} // already first
+        }
     }
     request_sync();
     Ok(())
@@ -1091,7 +1149,8 @@ fn select_name(picker: &impl IsA<glib::Object>, model: &gtk::StringList, name: &
     }
 }
 
-fn edit_dialog(ui: &Rc<Ui>, t: &Task) {
+/// `sub`: a subtask, which has no category to edit.
+fn edit_dialog(ui: &Rc<Ui>, t: &Task, sub: bool) {
     let b = view!("edit-dialog");
     let dialog: adw::AlertDialog = get(&b, "dialog");
     let summary: adw::EntryRow = get(&b, "summary");
@@ -1110,6 +1169,7 @@ fn edit_dialog(ui: &Rc<Ui>, t: &Task) {
         items.insert(items.len() - 1, c);
     }
     cats.splice(0, cats.n_items(), &items);
+    category.set_visible(!sub);
     category.set_selected(0);
     if let Some(c) = &t.category {
         select_name(&category, &cats, c);
@@ -1141,14 +1201,18 @@ fn edit_dialog(ui: &Rc<Ui>, t: &Task) {
         let patch = TaskPatch {
             summary: changed(summary.text().trim().to_string(), Some(&task.summary))
                 .filter(|s| !s.is_empty()),
-            category: changed(
-                (category.selected() > 0)
-                    .then(|| cats.string(category.selected()))
-                    .flatten()
-                    .map(String::from)
-                    .unwrap_or_default(),
-                task.category.as_deref(),
-            ),
+            category: (!sub)
+                .then(|| {
+                    changed(
+                        (category.selected() > 0)
+                            .then(|| cats.string(category.selected()))
+                            .flatten()
+                            .map(String::from)
+                            .unwrap_or_default(),
+                        task.category.as_deref(),
+                    )
+                })
+                .flatten(),
             description: changed(description.text().to_string(), task.description.as_deref()),
         };
         let uid = task.uid.clone();
