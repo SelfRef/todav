@@ -4,6 +4,7 @@ pub mod ical;
 pub mod json;
 mod login;
 pub mod push;
+mod settings;
 pub mod store;
 mod sync;
 
@@ -16,6 +17,7 @@ use std::sync::{Arc, Mutex};
 pub use config::{CategoryGroup, CategoryMeta, Sort};
 pub use login::{Credentials, LoginFlow, login_flow_poll, login_flow_start};
 pub use push::{PushRegistration, ntfy_check};
+pub use settings::DEVICE_ONLY;
 pub use sync::SyncReport;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +62,8 @@ pub struct Account {
 
 pub trait ChangeListener: Send + Sync {
     fn changed(&self, list_href: String, uids: Vec<String>);
+    /// Settings changed by another device arrived.
+    fn settings_changed(&self) {}
 }
 
 pub struct Client {
@@ -151,15 +155,6 @@ impl Client {
         )?;
         *self.dav.lock().unwrap() = None;
         Ok(())
-    }
-
-    /// Free-form front-end settings (ntfy URL, pinned list, ...), stored next to the data.
-    pub fn setting(&self, key: String) -> Option<String> {
-        store::kv_get(&self.db.lock().unwrap(), &format!("setting_{key}")).ok()?
-    }
-
-    pub fn set_setting(&self, key: String, value: String) -> Result<()> {
-        store::kv_set(&self.db.lock().unwrap(), &format!("setting_{key}"), &value)
     }
 
     fn dav(&self) -> Result<Arc<Dav>> {

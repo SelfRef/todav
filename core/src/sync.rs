@@ -25,6 +25,7 @@ impl Client {
             self.pull(&l.href, &mut report)?;
         }
         self.sync_config()?;
+        self.sync_settings()?;
         Ok(report)
     }
 

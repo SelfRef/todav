@@ -67,6 +67,13 @@ impl ChangeListener for Listener {
     fn changed(&self, list_href: String, _uids: Vec<String>) {
         post(Event::Changed(list_href));
     }
+
+    /// Synced settings (e.g. task order) affect every list's view.
+    fn settings_changed(&self) {
+        for l in core().lists() {
+            post(Event::Changed(l.href));
+        }
+    }
 }
 
 // --- keyring -----------------------------------------------------------------

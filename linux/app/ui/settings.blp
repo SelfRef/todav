@@ -40,10 +40,20 @@ Adw.PreferencesDialog dialog {
   Adw.PreferencesPage {
     title: "Connection";
     icon-name: "network-server-symbolic";
-    description: "Changes are applied when this window closes";
+
+    Adw.PreferencesGroup {
+      title: "Sync";
+
+      Adw.SwitchRow sync_settings {
+        title: "Sync settings with server";
+        subtitle: "Server addresses always stay on this device";
+        active: true;
+      }
+    }
 
     Adw.PreferencesGroup {
       title: "Servers";
+      description: "Changes are applied when this window closes";
 
       Adw.EntryRow server {
         title: "Nextcloud server";

@@ -96,6 +96,12 @@ pub fn present(parent: &impl IsA<gtk::Widget>) {
     let user = acc.map(|a| a.user).unwrap_or_default();
     let password = crate::password_load(&old_server, &user).unwrap_or_default();
     let old_ntfy = core().setting("ntfy_url".into()).unwrap_or_default();
+    let sync: adw::SwitchRow = get(&b, "sync_settings");
+    sync.set_active(core().setting("sync_settings".into()).as_deref() != Some("false"));
+    sync.connect_active_notify(|s| {
+        let _ = core().set_setting("sync_settings".into(), s.is_active().to_string());
+        request_sync(); // turning it on pulls the server's settings right away
+    });
     connect_order(&b, "task", None);
     connect_order(&b, "sub", Some("Also places the “Add subtask” field"));
     set_url(&server, &old_server);
