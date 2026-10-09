@@ -1,11 +1,89 @@
-//! Preferences dialog: server addresses with connection tests, applied on close.
+//! Preferences dialog: appearance (task order, applied at once) and server addresses with
+//! connection tests (applied on close).
 
 use crate::window::{get, toast, url_text, view};
 use crate::{core, request_sync};
 use adw::prelude::*;
 use gtk::{gio, glib};
+use todav_core::Sort;
 
 type UrlRow = (gtk::DropDown, adw::EntryRow);
+
+/// Setting values for the "Sort" rows, in row order.
+const SORTS: [(&str, Sort); 3] = [
+    ("manual", Sort::Manual),
+    ("newest", Sort::Newest),
+    ("oldest", Sort::Oldest),
+];
+
+fn sort_index(key: &str) -> u32 {
+    let v = core().setting(key.into()).unwrap_or_default();
+    SORTS.iter().position(|(s, _)| *s == v).unwrap_or(0) as u32
+}
+
+/// Where tasks show up and where new ones go; date sorting decides the latter.
+pub struct Order {
+    pub tasks: Sort,
+    pub subtasks: Sort,
+    pub task_start: bool,
+    pub sub_start: bool,
+}
+
+pub fn order() -> Order {
+    let sort = |key| SORTS[sort_index(key) as usize].1;
+    let start = |sort, key: &str| match sort {
+        Sort::Newest => true,
+        Sort::Oldest => false,
+        Sort::Manual => core().setting(key.into()).as_deref() == Some("start"),
+    };
+    let (tasks, subtasks) = (sort("task_sort"), sort("sub_sort"));
+    Order {
+        tasks,
+        subtasks,
+        task_start: start(tasks, "task_new"),
+        sub_start: start(subtasks, "sub_new"),
+    }
+}
+
+/// Tie a "Sort" row to its "Add new …" row: date sorting shows (and locks) where new items go,
+/// manual sorting lets the user pick. `hint` is the "Add new …" subtitle in manual mode.
+fn connect_order(b: &gtk::Builder, which: &'static str, hint: Option<&'static str>) {
+    let (sort_key, new_key) = (format!("{which}_sort"), format!("{which}_new"));
+    let sort: adw::ComboRow = get(b, &sort_key);
+    let new: adw::ComboRow = get(b, &new_key);
+    let show = {
+        let (sort, new, new_key) = (sort.clone(), new.clone(), new_key.clone());
+        move || {
+            let manual = sort.selected() == 0;
+            let start = match sort.selected() {
+                1 => true,
+                2 => false,
+                _ => core().setting(new_key.clone()).as_deref() == Some("start"),
+            };
+            new.set_sensitive(manual); // first, so the change below is not saved
+            new.set_selected(if start { 0 } else { 1 });
+            new.set_subtitle(if manual {
+                hint.unwrap_or_default()
+            } else {
+                "Set by the sort order"
+            });
+        }
+    };
+    sort.set_selected(sort_index(&sort_key));
+    show();
+    sort.connect_selected_notify(move |s| {
+        let _ = core().set_setting(sort_key.clone(), SORTS[s.selected() as usize].0.into());
+        show();
+        crate::window::refresh();
+    });
+    new.connect_selected_notify(move |n| {
+        if n.is_sensitive() {
+            let v = if n.selected() == 0 { "start" } else { "end" };
+            let _ = core().set_setting(new_key.clone(), v.into());
+            crate::window::refresh();
+        }
+    });
+}
 
 pub fn present(parent: &impl IsA<gtk::Widget>) {
     let b = view!("settings");
@@ -18,6 +96,8 @@ pub fn present(parent: &impl IsA<gtk::Widget>) {
     let user = acc.map(|a| a.user).unwrap_or_default();
     let password = crate::password_load(&old_server, &user).unwrap_or_default();
     let old_ntfy = core().setting("ntfy_url".into()).unwrap_or_default();
+    connect_order(&b, "task", None);
+    connect_order(&b, "sub", Some("Also places the “Add subtask” field"));
     set_url(&server, &old_server);
     set_url(&ntfy, &old_ntfy);
 

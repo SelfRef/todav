@@ -70,6 +70,7 @@ fn add_on_a_shows_on_b_and_external_edits_arrive() {
             "Żółty ser, mleko".into(),
             Some("Groceries".into()),
             None,
+            false,
         )
         .unwrap();
     f.a.sync().unwrap();
@@ -114,7 +115,7 @@ fn add_on_a_shows_on_b_and_external_edits_arrive() {
 fn offline_tick_vs_edit_resolves_to_done() {
     let f = Fixture::new("conflict");
     let t =
-        f.a.add_task(f.href.clone(), "Buy bread".into(), None, None)
+        f.a.add_task(f.href.clone(), "Buy bread".into(), None, None, false)
             .unwrap();
     f.a.sync().unwrap();
     f.b.sync().unwrap();
@@ -144,7 +145,7 @@ fn offline_tick_vs_edit_resolves_to_done() {
 fn removed_remotely_disappears() {
     let f = Fixture::new("removed");
     let t =
-        f.a.add_task(f.href.clone(), "Gone soon".into(), None, None)
+        f.a.add_task(f.href.clone(), "Gone soon".into(), None, None, false)
             .unwrap();
     f.a.sync().unwrap();
     f.dav

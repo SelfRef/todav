@@ -64,7 +64,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 .position(|a| a == "-c")
                 .and_then(|i| args.get(i + 1))
                 .cloned();
-            let t = client.add_task(list.href, arg(2)?, cat, None)?;
+            let t = client.add_task(list.href, arg(2)?, cat, None, false)?;
             println!("{}", t.uid);
             println!("{:?}", client.sync()?);
         }

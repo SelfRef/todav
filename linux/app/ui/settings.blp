@@ -5,6 +5,41 @@ Adw.PreferencesDialog dialog {
   search-enabled: false;
 
   Adw.PreferencesPage {
+    title: "Appearance";
+    icon-name: "preferences-desktop-appearance-symbolic";
+
+    Adw.PreferencesGroup {
+      title: "Tasks";
+
+      Adw.ComboRow task_sort {
+        title: "Sort";
+        model: Gtk.StringList { strings ["Manual", "Newest first", "Oldest first"] };
+      }
+
+      Adw.ComboRow task_new {
+        title: "Add new tasks";
+        model: Gtk.StringList { strings ["At the start", "At the end"] };
+      }
+    }
+
+    Adw.PreferencesGroup {
+      title: "Subtasks";
+
+      Adw.ComboRow sub_sort {
+        title: "Sort";
+        model: Gtk.StringList { strings ["Manual", "Newest first", "Oldest first"] };
+      }
+
+      Adw.ComboRow sub_new {
+        title: "Add new subtasks";
+        model: Gtk.StringList { strings ["At the start", "At the end"] };
+      }
+    }
+  }
+
+  Adw.PreferencesPage {
+    title: "Connection";
+    icon-name: "network-server-symbolic";
     description: "Changes are applied when this window closes";
 
     Adw.PreferencesGroup {

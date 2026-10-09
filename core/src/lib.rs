@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
-pub use config::{CategoryGroup, CategoryMeta};
+pub use config::{CategoryGroup, CategoryMeta, Sort};
 pub use login::{Credentials, LoginFlow, login_flow_poll, login_flow_start};
 pub use push::{PushRegistration, ntfy_check};
 pub use sync::SyncReport;
@@ -194,6 +194,7 @@ impl Client {
         summary: String,
         category: Option<String>,
         parent_uid: Option<String>,
+        at_start: bool,
     ) -> Result<Task> {
         let uid = new_uid();
         let t = now();
@@ -207,11 +208,13 @@ impl Client {
         cal.set_time("LAST-MODIFIED", Some(t));
         {
             let db = self.db.lock().unwrap();
-            let next: i64 = db.query_row(
-                "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM tasks WHERE list_href = ?",
-                [&list_href],
-                |r| r.get(0),
-            )?;
+            // Before or after every task in the list, so also first or last among its siblings.
+            let sql = if at_start {
+                "SELECT COALESCE(MIN(sort_order), 0) - 1 FROM tasks WHERE list_href = ?"
+            } else {
+                "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM tasks WHERE list_href = ?"
+            };
+            let next: i64 = db.query_row(sql, [&list_href], |r| r.get(0))?;
             cal.set("X-TODAV-ORDER", "", Some(&next.to_string()));
             store::save(&db, &list_href, None, None, &cal, store::MODIFIED)?;
         }

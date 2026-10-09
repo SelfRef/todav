@@ -125,6 +125,13 @@ pub fn present(app: &adw::Application) {
     ui.window.present();
 }
 
+/// Rebuild the task page, e.g. after the task order changed.
+pub fn refresh() {
+    if let Some(ui) = ui() {
+        refresh_tasks(&ui);
+    }
+}
+
 pub fn toast(msg: &str) {
     if let Some(ui) = ui() {
         ui.toasts.add_toast(adw::Toast::new(msg));
@@ -294,7 +301,8 @@ fn connect(ui: &Rc<Ui>) {
                 .then(|| ui.cats.string(ui.cat.selected()).map(|s| s.to_string()))
                 .flatten(),
         };
-        match core().add_task(list, text, cat, None) {
+        let start = crate::settings::order().task_start;
+        match core().add_task(list, text, cat, None, start) {
             Ok(_) => {
                 entry.set_text("");
                 request_sync();
@@ -520,7 +528,8 @@ fn refresh_tasks(ui: &Rc<Ui>) {
             .unwrap_or_default(),
     );
 
-    let groups = core().grouped(href.clone());
+    let order = crate::settings::order();
+    let groups = core().grouped_by(href.clone(), order.tasks, order.subtasks);
 
     // Category picker: configured categories, then any others in use; keep the selection.
     let selected = ui.cats.string(ui.cat.selected()).map(|s| s.to_string());
@@ -607,7 +616,7 @@ fn refresh_tasks(ui: &Rc<Ui>) {
                 if adding && !subs.is_empty() {
                     ui.adding.take(); // the first subtask exists; from now on subtasks decide
                 }
-                group.add(&tree_row(ui, root, &subs));
+                group.add(&tree_row(ui, root, &subs, order.sub_start));
             }
         }
         ui.groups.append(&group);
@@ -702,7 +711,8 @@ fn leaf_row(ui: &Rc<Ui>, t: &Task) -> adw::ActionRow {
 }
 
 /// A root task with its subtasks and an entry for adding more.
-fn tree_row(ui: &Rc<Ui>, root: &Task, subs: &[(usize, &Task)]) -> adw::ExpanderRow {
+/// `start`: new subtasks go first, so the entry for them comes first too.
+fn tree_row(ui: &Rc<Ui>, root: &Task, subs: &[(usize, &Task)], start: bool) -> adw::ExpanderRow {
     let row = adw::ExpanderRow::builder()
         .title(&root.summary)
         .use_markup(false)
@@ -738,9 +748,6 @@ fn tree_row(ui: &Rc<Ui>, root: &Task, subs: &[(usize, &Task)]) -> adw::ExpanderR
         }
     });
 
-    for (depth, t) in subs {
-        row.add_row(&task_row(ui, t, *depth));
-    }
     let entry = adw::EntryRow::builder().title("Add subtask").build();
     entry.set_margin_start(INDENT);
     entry.add_prefix(&gtk::Image::from_icon_name("list-add-symbolic"));
@@ -759,7 +766,8 @@ fn tree_row(ui: &Rc<Ui>, root: &Task, subs: &[(usize, &Task)]) -> adw::ExpanderR
             return;
         }
         let parent = Some(root.uid.clone());
-        match core().add_task(root.list_href.clone(), text, root.category.clone(), parent) {
+        let (list, cat) = (root.list_href.clone(), root.category.clone());
+        match core().add_task(list, text, cat, parent, start) {
             Ok(_) => {
                 e.set_text("");
                 *ui.focus_sub.borrow_mut() = Some(root.uid.clone()); // keep typing after the rebuild
@@ -768,7 +776,15 @@ fn tree_row(ui: &Rc<Ui>, root: &Task, subs: &[(usize, &Task)]) -> adw::ExpanderR
             Err(err) => ui.toasts.add_toast(adw::Toast::new(&err.to_string())),
         }
     });
-    row.add_row(&entry);
+    if start {
+        row.add_row(&entry);
+    }
+    for (depth, t) in subs {
+        row.add_row(&task_row(ui, t, *depth));
+    }
+    if !start {
+        row.add_row(&entry);
+    }
     row
 }
 

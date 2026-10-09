@@ -59,7 +59,8 @@ fn call(method: &str, params: &glib::Variant) -> Result<Option<glib::Variant>, S
         "GetTasks" => {
             let (list,) = params.get::<(String,)>().ok_or_else(bad)?;
             let mut out: Vec<(String, String, String, bool)> = Vec::new();
-            for g in c.grouped(list) {
+            let order = crate::settings::order();
+            for g in c.grouped_by(list, order.tasks, order.subtasks) {
                 let cat = g.name.unwrap_or_default();
                 for t in g.tasks {
                     // The extension cannot see hierarchy; mark subtasks inline.
@@ -82,7 +83,13 @@ fn call(method: &str, params: &glib::Variant) -> Result<Option<glib::Variant>, S
         "AddTask" => {
             let (list, summary) = params.get::<(String, String)>().ok_or_else(bad)?;
             let t = c
-                .add_task(list, summary, None, None)
+                .add_task(
+                    list,
+                    summary,
+                    None,
+                    None,
+                    crate::settings::order().task_start,
+                )
                 .map_err(|e| e.to_string())?;
             request_sync();
             Some((t.uid,).to_variant())

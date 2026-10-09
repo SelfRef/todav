@@ -10,6 +10,27 @@ pub struct CategoryMeta {
     pub icon: Option<String>,
 }
 
+/// Display order of top-level tasks or of subtasks among their siblings.
+/// `Manual` is the stored order (X-TODAV-ORDER); the others sort by creation time.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Sort {
+    #[default]
+    Manual,
+    Newest,
+    Oldest,
+}
+
+impl Sort {
+    /// Stable, so equal creation times keep the manual order.
+    fn apply(self, tasks: &mut [Task]) {
+        match self {
+            Sort::Manual => {}
+            Sort::Newest => tasks.sort_by_key(|t| std::cmp::Reverse(t.created.unwrap_or(0))),
+            Sort::Oldest => tasks.sort_by_key(|t| t.created.unwrap_or(0)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CategoryGroup {
     /// None = tasks without a category ("Other").
@@ -153,8 +174,18 @@ impl Client {
     /// categories alphabetically, then uncategorised. Subtasks follow their top-level ancestor,
     /// done ones included while that ancestor is open.
     pub fn grouped(&self, list_href: String) -> Vec<CategoryGroup> {
+        self.grouped_by(list_href, Sort::Manual, Sort::Manual)
+    }
+
+    /// `grouped` with top-level tasks and subtasks (among siblings) in the given orders.
+    pub fn grouped_by(&self, list_href: String, tasks: Sort, subtasks: Sort) -> Vec<CategoryGroup> {
         let meta = self.categories(list_href.clone());
-        group(split_done(self.tasks(list_href, true)).0, &meta)
+        group(
+            split_done(self.tasks(list_href, true)).0,
+            &meta,
+            tasks,
+            subtasks,
+        )
     }
 
     /// Done tasks not shown by `grouped`: done top-level tasks and everything done below them.
@@ -188,7 +219,12 @@ fn split_done(tasks: Vec<Task>) -> (Vec<Task>, Vec<Task>) {
     tasks.into_iter().partition(|t| keep.contains(&t.uid))
 }
 
-fn group(tasks: Vec<Task>, meta: &[CategoryMeta]) -> Vec<CategoryGroup> {
+fn group(
+    tasks: Vec<Task>,
+    meta: &[CategoryMeta],
+    sort: Sort,
+    sub_sort: Sort,
+) -> Vec<CategoryGroup> {
     let uids: HashSet<String> = tasks.iter().map(|t| t.uid.clone()).collect();
     let mut children: HashMap<String, Vec<Task>> = HashMap::new();
     let mut top = Vec::new();
@@ -198,6 +234,8 @@ fn group(tasks: Vec<Task>, meta: &[CategoryMeta]) -> Vec<CategoryGroup> {
             None => top.push(t),
         }
     }
+    sort.apply(&mut top);
+    children.values_mut().for_each(|kids| sub_sort.apply(kids));
     let mut groups: Vec<CategoryGroup> = meta
         .iter()
         .map(|m| CategoryGroup {
@@ -287,7 +325,7 @@ mod tests {
             task("orphan", Some("Car"), Some("gone")), // parent not open → top level
             task("tyres", Some("Car"), None),
         ];
-        let g = group(tasks, &meta);
+        let g = group(tasks, &meta, Sort::Manual, Sort::Manual);
         let shape: Vec<(Option<&str>, Vec<&str>)> = g
             .iter()
             .map(|g| {
@@ -307,6 +345,40 @@ mod tests {
             ]
         );
         assert_eq!(g[0].icon.as_deref(), Some("house"));
+    }
+
+    #[test]
+    fn sorts_tasks_and_subtasks_separately() {
+        let at = |uid, parent, created| Task {
+            created: Some(created),
+            ..task(uid, None, parent)
+        };
+        // Manual (input) order differs from creation order on both levels.
+        let tasks = vec![
+            at("old", None, 1),
+            at("old_b", Some("old"), 5),
+            at("old_a", Some("old"), 4),
+            at("new", None, 9),
+        ];
+        let order = |s, sub| {
+            group(tasks.clone(), &[], s, sub)[0]
+                .tasks
+                .iter()
+                .map(|t| t.uid.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            order(Sort::Manual, Sort::Manual),
+            ["old", "old_b", "old_a", "new"]
+        );
+        assert_eq!(
+            order(Sort::Newest, Sort::Oldest),
+            ["new", "old", "old_a", "old_b"]
+        );
+        assert_eq!(
+            order(Sort::Oldest, Sort::Newest),
+            ["old", "old_b", "old_a", "new"]
+        );
     }
 
     #[test]
