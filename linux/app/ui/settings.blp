@@ -37,6 +37,15 @@ Adw.PreferencesDialog dialog {
     }
 
     Adw.PreferencesGroup {
+      title: "Categories";
+
+      Adw.ComboRow category_view {
+        title: "Show categories";
+        model: Gtk.StringList { strings ["Group by category", "As tags", "Hide"] };
+      }
+    }
+
+    Adw.PreferencesGroup {
       title: "Interaction";
 
       Adw.SwitchRow drag_handles {

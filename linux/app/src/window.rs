@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use todav_core::{Sort, Task, TaskPatch};
+use todav_core::{CategoryGroup, Sort, Task, TaskPatch};
 
 /// Libadwaita only styles plain buttons as pills; round the ends of the sign-in split button to match.
 /// The category section header turns its arrow like an expander row, without a "pressed" look.
@@ -20,6 +20,7 @@ splitbutton.pill > menubutton > button { padding: 10px 16px 10px 12px; border-ra
 .cat-toggle:not(:checked) image { -gtk-icon-transform: rotate(-90deg); }
 .cat-toggle:checked:not(:hover) { background: none; }
 row.subtask-done label.title { text-decoration-line: line-through; opacity: 0.55; }
+.tag { padding: 2px 10px; border-radius: 9999px; font-size: smaller; color: @accent_color; background: alpha(@accent_bg_color, 0.15); }
 .drop-above { box-shadow: inset 0 2px 0 0 @accent_bg_color; }
 .drop-below { box-shadow: inset 0 -2px 0 0 @accent_bg_color; }
 ";
@@ -61,6 +62,8 @@ struct Ui {
     expanded: RefCell<HashSet<String>>,
     /// Root task shown as an expander for its first subtask, before it has any.
     adding: RefCell<Option<String>>,
+    /// Rows show their category as a tag (the "Show as tags" category view).
+    tags: Cell<bool>,
     /// Tasks are dragged by a handle (touchscreens) instead of the whole row.
     handles: Cell<bool>,
     /// The task being dragged and where it came from.
@@ -235,6 +238,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         groups: get(&b, "groups"),
         expanded: RefCell::new(HashSet::new()),
         adding: RefCell::new(None),
+        tags: Cell::new(false),
         handles: Cell::new(false),
         dragging: RefCell::new(None),
         focus_sub: RefCell::new(None),
@@ -604,21 +608,40 @@ fn refresh_tasks(ui: &Rc<Ui>) {
         None => ui.cat_list.unselect_all(),
     }
     let shown = |c: Option<&String>| filter.as_ref().is_none_or(|f| c == f.as_ref());
-    let groups: Vec<_> = groups
-        .into_iter()
-        .filter(|g| shown(g.name.as_ref()))
-        .collect();
+
+    // "group": a section per category; "tags" / "none": one list in overall order.
+    let view = core().setting("category_view".into()).unwrap_or_default();
+    let grouping = view != "tags" && view != "none";
+    ui.tags.set(view == "tags");
+    let groups = if grouping {
+        groups
+    } else {
+        vec![CategoryGroup {
+            name: None,
+            icon: None,
+            tasks: core().ungrouped_by(href.clone(), order.tasks, order.subtasks),
+        }]
+    };
 
     // A list without categories is one plain list; otherwise every group, "Other" too, has a header.
-    let titled = !names.is_empty();
+    let titled = grouping && !names.is_empty();
+    let mut any = false;
     for g in &groups {
+        // The sidebar filter goes by each top-level task's category (a group's name in "group").
+        let trees: Vec<_> = trees(&g.tasks)
+            .into_iter()
+            .filter(|(root, _)| shown(root.category.as_ref()))
+            .collect();
+        if trees.is_empty() {
+            continue;
+        }
+        any = true;
         let group = adw::PreferencesGroup::new();
         if titled {
             group.set_title(&glib::markup_escape_text(
                 g.name.as_deref().unwrap_or(OTHER),
             ));
         }
-        let trees = trees(&g.tasks);
         for (i, (root, subs)) in trees.iter().enumerate() {
             let slot = Slot {
                 group: g.name.clone(),
@@ -655,7 +678,7 @@ fn refresh_tasks(ui: &Rc<Ui>) {
         group.add(&exp);
         ui.groups.append(&group);
     }
-    if groups.is_empty() {
+    if !any {
         let empty = adw::StatusPage::builder()
             .icon_name("checkbox-checked-symbolic")
             .title("All Done")
@@ -702,6 +725,9 @@ fn task_row(ui: &Rc<Ui>, t: &Task, indent: usize, slot: Option<Slot>) -> adw::Ac
     }
     if let Some(d) = subtitle(t) {
         row.set_subtitle(d);
+    }
+    if let Some(tag) = tag(ui, t) {
+        row.add_suffix(&tag);
     }
     row.add_suffix(&delete_button(t));
     let (weak, task) = (Rc::downgrade(ui), t.clone());
@@ -760,6 +786,10 @@ fn tree_row(
     });
     row.add_suffix(&edit);
     row.add_suffix(&delete_button(root));
+    // ExpanderRow puts each new suffix to the left of the previous ones.
+    if let Some(tag) = tag(ui, root) {
+        row.add_suffix(&tag);
+    }
     let (weak, uid) = (Rc::downgrade(ui), root.uid.clone());
     let empty = subs.is_empty();
     row.connect_expanded_notify(move |r| {
@@ -958,6 +988,17 @@ fn drop_task(d: &Task, ds: &Slot, t: &Task, ts: &Slot, above: bool) -> todav_cor
     }
     request_sync();
     Ok(())
+}
+
+/// Category pill for the "Show as tags" view.
+fn tag(ui: &Ui, t: &Task) -> Option<gtk::Label> {
+    let c = t.category.as_deref().filter(|_| ui.tags.get())?;
+    let l = gtk::Label::builder()
+        .label(c)
+        .valign(gtk::Align::Center)
+        .build();
+    l.add_css_class("tag");
+    Some(l)
 }
 
 /// First line of the note; rows use plain text (`use_markup(false)`), so no escaping.

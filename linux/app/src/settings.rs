@@ -102,6 +102,14 @@ pub fn present(parent: &impl IsA<gtk::Widget>) {
         let _ = core().set_setting("sync_settings".into(), s.is_active().to_string());
         request_sync(); // turning it on pulls the server's settings right away
     });
+    const VIEWS: [&str; 3] = ["group", "tags", "none"];
+    let view: adw::ComboRow = get(&b, "category_view");
+    let current = core().setting("category_view".into()).unwrap_or_default();
+    view.set_selected(VIEWS.iter().position(|v| *v == current).unwrap_or(0) as u32);
+    view.connect_selected_notify(|v| {
+        let _ = core().set_setting("category_view".into(), VIEWS[v.selected() as usize].into());
+        crate::window::refresh();
+    });
     let handles: adw::SwitchRow = get(&b, "drag_handles");
     handles.set_active(core().setting("drag_handles".into()).as_deref() == Some("true"));
     handles.connect_active_notify(|h| {

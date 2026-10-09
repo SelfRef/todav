@@ -177,6 +177,12 @@ impl Client {
         self.grouped_by(list_href, Sort::Manual, Sort::Manual)
     }
 
+    /// Open tasks as one list, no category grouping: each top-level task followed by its
+    /// subtasks, in the given orders (done subtasks included as in `grouped`).
+    pub fn ungrouped_by(&self, list_href: String, tasks: Sort, subtasks: Sort) -> Vec<Task> {
+        forest(split_done(self.tasks(list_href, true)).0, tasks, subtasks).concat()
+    }
+
     /// `grouped` with top-level tasks and subtasks (among siblings) in the given orders.
     pub fn grouped_by(&self, list_href: String, tasks: Sort, subtasks: Sort) -> Vec<CategoryGroup> {
         let meta = self.categories(list_href.clone());
@@ -219,12 +225,8 @@ fn split_done(tasks: Vec<Task>) -> (Vec<Task>, Vec<Task>) {
     tasks.into_iter().partition(|t| keep.contains(&t.uid))
 }
 
-fn group(
-    tasks: Vec<Task>,
-    meta: &[CategoryMeta],
-    sort: Sort,
-    sub_sort: Sort,
-) -> Vec<CategoryGroup> {
+/// Each top-level task followed by its (flattened, depth-first) subtasks.
+fn forest(tasks: Vec<Task>, sort: Sort, sub_sort: Sort) -> Vec<Vec<Task>> {
     let uids: HashSet<String> = tasks.iter().map(|t| t.uid.clone()).collect();
     let mut children: HashMap<String, Vec<Task>> = HashMap::new();
     let mut top = Vec::new();
@@ -236,6 +238,28 @@ fn group(
     }
     sort.apply(&mut top);
     children.values_mut().for_each(|kids| sub_sort.apply(kids));
+    top.into_iter()
+        .map(|t| {
+            let mut flat = Vec::new();
+            let mut stack = vec![t];
+            while let Some(t) = stack.pop() {
+                if let Some(mut kids) = children.remove(&t.uid) {
+                    kids.reverse();
+                    stack.extend(kids);
+                }
+                flat.push(t);
+            }
+            flat
+        })
+        .collect()
+}
+
+fn group(
+    tasks: Vec<Task>,
+    meta: &[CategoryMeta],
+    sort: Sort,
+    sub_sort: Sort,
+) -> Vec<CategoryGroup> {
     let mut groups: Vec<CategoryGroup> = meta
         .iter()
         .map(|m| CategoryGroup {
@@ -245,16 +269,7 @@ fn group(
         })
         .collect();
     let mut unknown: BTreeMap<Option<String>, Vec<Task>> = BTreeMap::new();
-    for t in top {
-        let mut flat = Vec::new();
-        let mut stack = vec![t];
-        while let Some(t) = stack.pop() {
-            if let Some(mut kids) = children.remove(&t.uid) {
-                kids.reverse();
-                stack.extend(kids);
-            }
-            flat.push(t);
-        }
+    for flat in forest(tasks, sort, sub_sort) {
         let cat = flat[0].category.clone();
         match groups.iter_mut().find(|g| g.name == cat && cat.is_some()) {
             Some(g) => g.tasks.extend(flat),
@@ -379,6 +394,22 @@ mod tests {
             order(Sort::Oldest, Sort::Newest),
             ["old", "old_b", "old_a", "new"]
         );
+    }
+
+    #[test]
+    fn ungrouped_keeps_overall_order_across_categories() {
+        let tasks = vec![
+            task("b1", Some("B"), None),
+            task("a1", Some("A"), None),
+            task("a1_sub", None, Some("a1")),
+            task("b2", Some("B"), None),
+        ];
+        let flat: Vec<String> = forest(tasks, Sort::Manual, Sort::Manual)
+            .concat()
+            .into_iter()
+            .map(|t| t.uid)
+            .collect();
+        assert_eq!(flat, ["b1", "a1", "a1_sub", "b2"]);
     }
 
     #[test]
