@@ -6,6 +6,7 @@ use crate::{Client, Error, Result, b64decode, b64encode, store};
 use ring::{aead, hkdf};
 use rusqlite::params;
 use std::io::BufRead;
+use std::sync::atomic::Ordering;
 
 #[derive(Debug, Clone)]
 pub struct PushRegistration {
@@ -149,7 +150,13 @@ impl Client {
         Ok((b64encode(&public_key(&private)?, true), auth))
     }
 
-    /// Blocking: register with an ntfy topic and sync on every message. Reconnects forever.
+    /// Make running `listen` calls return. They act on nothing from now on, but each holds its
+    /// connection until the next ntfy keepalive (up to 45 s) before returning.
+    pub fn stop_listening(&self) {
+        self.listen_gen.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Blocking: register with an ntfy topic and sync on every message. Reconnects until `stop_listening`.
     pub fn listen(
         &self,
         ntfy_url: String,
@@ -170,7 +177,12 @@ impl Client {
         let resource = format!("{base}/{topic}?up=1");
         let mut since = "all".to_string();
         let mut last_register = 0;
+        let started = self.listen_gen.load(Ordering::SeqCst);
+        let stopped = || self.listen_gen.load(Ordering::SeqCst) != started;
         loop {
+            if stopped() {
+                return Ok(());
+            }
             if crate::now() - last_register > 3600 {
                 on_event(
                     self.push_register(resource.clone(), MAX_EXPIRY as u64)
@@ -180,6 +192,7 @@ impl Client {
             }
             let res = ntfy_stream(
                 &format!("{base}/{topic}/json?since={since}"),
+                &stopped,
                 &mut |id, body| {
                     since = id.to_string();
                     let r = self.push_decode(body).and_then(|topics| {
@@ -195,14 +208,17 @@ impl Client {
                     on_event(r);
                 },
             );
+            if stopped() {
+                return Ok(());
+            }
             on_event(res.map(|_| Default::default()));
             std::thread::sleep(std::time::Duration::from_secs(5));
         }
     }
 }
 
-/// Read an ntfy JSON stream until it ends; calls `f(id, body)` for every message event.
-fn ntfy_stream(url: &str, f: &mut dyn FnMut(&str, Vec<u8>)) -> Result<()> {
+/// Read an ntfy JSON stream until it ends or `stop()`; calls `f(id, body)` for every message event.
+fn ntfy_stream(url: &str, stop: &dyn Fn() -> bool, f: &mut dyn FnMut(&str, Vec<u8>)) -> Result<()> {
     let agent = ureq::Agent::config_builder()
         .timeout_global(None)
         .timeout_recv_body(Some(std::time::Duration::from_secs(120))) // ntfy sends keepalives every 45 s
@@ -215,6 +231,9 @@ fn ntfy_stream(url: &str, f: &mut dyn FnMut(&str, Vec<u8>)) -> Result<()> {
     let reader = std::io::BufReader::new(resp.into_body().into_reader());
     for line in reader.lines() {
         let line = line.map_err(|e| Error::Net(e.to_string()))?;
+        if stop() {
+            return Ok(());
+        }
         let Some(m) = Json::parse(&line) else {
             continue;
         };
@@ -230,6 +249,29 @@ fn ntfy_stream(url: &str, f: &mut dyn FnMut(&str, Vec<u8>)) -> Result<()> {
         f(&field("id"), body);
     }
     Ok(())
+}
+
+/// Check that `ntfy_url` answers like an ntfy server (`/v1/health`).
+pub fn ntfy_check(ntfy_url: String) -> Result<()> {
+    let url = format!("{}/v1/health", ntfy_url.trim_end_matches('/'));
+    let mut r = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .user_agent("Todav")
+        .timeout_global(Some(std::time::Duration::from_secs(10)))
+        .build()
+        .new_agent()
+        .get(&url)
+        .call()
+        .map_err(|e| Error::Net(e.to_string()))?;
+    let status = r.status().as_u16();
+    let body = r
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| Error::Net(e.to_string()))?;
+    match Json::parse(&body).and_then(|j| j.get("healthy").cloned()) {
+        Some(Json::Bool(true)) => Ok(()),
+        _ => Err(Error::Http(status, "not a healthy ntfy server".into())),
+    }
 }
 
 fn public_key(private: &[u8]) -> Result<Vec<u8>> {

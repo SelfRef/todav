@@ -10,11 +10,12 @@ mod sync;
 use caldav::Dav;
 use ical::Calendar;
 use rusqlite::Connection;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 pub use config::{CategoryGroup, CategoryMeta};
 pub use login::{Credentials, LoginFlow, login_flow_poll, login_flow_start};
-pub use push::PushRegistration;
+pub use push::{PushRegistration, ntfy_check};
 pub use sync::SyncReport;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -66,6 +67,8 @@ pub struct Client {
     dav: Mutex<Option<Arc<Dav>>>,
     listeners: Mutex<Vec<Box<dyn ChangeListener>>>,
     sync_lock: Mutex<()>,
+    /// Bumped by `stop_listening`; a `listen` call returns once it differs from the value it started with.
+    listen_gen: AtomicU64,
 }
 
 pub fn now() -> i64 {
@@ -108,6 +111,7 @@ impl Client {
             dav: Mutex::new(None),
             listeners: Mutex::new(Vec::new()),
             sync_lock: Mutex::new(()),
+            listen_gen: AtomicU64::new(0),
         })
     }
 
