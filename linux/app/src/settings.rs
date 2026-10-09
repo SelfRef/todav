@@ -102,6 +102,12 @@ pub fn present(parent: &impl IsA<gtk::Widget>) {
         let _ = core().set_setting("sync_settings".into(), s.is_active().to_string());
         request_sync(); // turning it on pulls the server's settings right away
     });
+    let handles: adw::SwitchRow = get(&b, "drag_handles");
+    handles.set_active(core().setting("drag_handles".into()).as_deref() == Some("true"));
+    handles.connect_active_notify(|h| {
+        let _ = core().set_setting("drag_handles".into(), h.is_active().to_string());
+        crate::window::refresh();
+    });
     connect_order(&b, "task", None);
     connect_order(&b, "sub", Some("Also places the “Add subtask” field"));
     set_url(&server, &old_server);

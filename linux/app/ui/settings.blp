@@ -35,6 +35,15 @@ Adw.PreferencesDialog dialog {
         model: Gtk.StringList { strings ["At the start", "At the end"] };
       }
     }
+
+    Adw.PreferencesGroup {
+      title: "Interaction";
+
+      Adw.SwitchRow drag_handles {
+        title: "Drag handles";
+        subtitle: "Move tasks by a handle instead of the whole row, for touchscreens";
+      }
+    }
   }
 
   Adw.PreferencesPage {

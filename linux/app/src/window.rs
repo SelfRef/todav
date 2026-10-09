@@ -7,11 +7,11 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use todav_core::{Task, TaskPatch};
+use todav_core::{Sort, Task, TaskPatch};
 
 /// Libadwaita only styles plain buttons as pills; round the ends of the sign-in split button to match.
 /// The category section header turns its arrow like an expander row, without a "pressed" look.
-/// Done subtasks are struck through.
+/// Done subtasks are struck through; drop targets show a line where the task will land.
 const CSS: &str = "
 splitbutton.pill { border-radius: 9999px; }
 splitbutton.pill > button { padding: 10px 20px 10px 32px; border-radius: 9999px 0 0 9999px; }
@@ -20,6 +20,8 @@ splitbutton.pill > menubutton > button { padding: 10px 16px 10px 12px; border-ra
 .cat-toggle:not(:checked) image { -gtk-icon-transform: rotate(-90deg); }
 .cat-toggle:checked:not(:hover) { background: none; }
 row.subtask-done label.title { text-decoration-line: line-through; opacity: 0.55; }
+.drop-above { box-shadow: inset 0 2px 0 0 @accent_bg_color; }
+.drop-below { box-shadow: inset 0 -2px 0 0 @accent_bg_color; }
 ";
 
 /// Left margin per subtask level, in pixels.
@@ -59,6 +61,10 @@ struct Ui {
     expanded: RefCell<HashSet<String>>,
     /// Root task shown as an expander for its first subtask, before it has any.
     adding: RefCell<Option<String>>,
+    /// Tasks are dragged by a handle (touchscreens) instead of the whole row.
+    handles: Cell<bool>,
+    /// The task being dragged and where it came from.
+    dragging: RefCell<Option<(Task, Slot)>>,
     /// Root task whose "Add subtask" entry takes focus after the next rebuild.
     focus_sub: RefCell<Option<String>>,
     server: (gtk::DropDown, adw::EntryRow),
@@ -229,6 +235,8 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         groups: get(&b, "groups"),
         expanded: RefCell::new(HashSet::new()),
         adding: RefCell::new(None),
+        handles: Cell::new(false),
+        dragging: RefCell::new(None),
         focus_sub: RefCell::new(None),
         server: (get(&b, "server_scheme"), get(&b, "server")),
         ntfy: (get(&b, "ntfy_scheme"), get(&b, "ntfy")),
@@ -529,6 +537,8 @@ fn refresh_tasks(ui: &Rc<Ui>) {
     );
 
     let order = crate::settings::order();
+    ui.handles
+        .set(core().setting("drag_handles".into()).as_deref() == Some("true"));
     let groups = core().grouped_by(href.clone(), order.tasks, order.subtasks);
 
     // Category picker: configured categories, then any others in use; keep the selection.
@@ -608,15 +618,21 @@ fn refresh_tasks(ui: &Rc<Ui>) {
                 g.name.as_deref().unwrap_or(OTHER),
             ));
         }
-        for (root, subs) in trees(&g.tasks) {
+        let trees = trees(&g.tasks);
+        for (i, (root, subs)) in trees.iter().enumerate() {
+            let slot = Slot {
+                group: g.name.clone(),
+                root: true,
+                next: trees.get(i + 1).map(|(t, _)| t.uid.clone()),
+            };
             let adding = ui.adding.borrow().as_ref() == Some(&root.uid);
             if subs.is_empty() && !adding {
-                group.add(&leaf_row(ui, root));
+                group.add(&leaf_row(ui, root, slot));
             } else {
                 if adding && !subs.is_empty() {
                     ui.adding.take(); // the first subtask exists; from now on subtasks decide
                 }
-                group.add(&tree_row(ui, root, &subs, order.sub_start));
+                group.add(&tree_row(ui, root, subs, order.sub_start, slot));
             }
         }
         ui.groups.append(&group);
@@ -633,7 +649,7 @@ fn refresh_tasks(ui: &Rc<Ui>) {
             .title(format!("Done ({})", done.len()))
             .build();
         for t in done.iter().take(DONE_SHOWN) {
-            exp.add_row(&task_row(ui, t, 0));
+            exp.add_row(&task_row(ui, t, 0, None));
         }
         let group = adw::PreferencesGroup::new();
         group.add(&exp);
@@ -668,8 +684,8 @@ fn trees(tasks: &[Task]) -> Vec<(&Task, Vec<(usize, &Task)>)> {
     out
 }
 
-/// `indent` levels of left margin on the whole row, for subtasks.
-fn task_row(ui: &Rc<Ui>, t: &Task, indent: usize) -> adw::ActionRow {
+/// `indent` levels of left margin on the whole row, for subtasks; `slot` makes it draggable.
+fn task_row(ui: &Rc<Ui>, t: &Task, indent: usize, slot: Option<Slot>) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
         .title(&t.summary)
         .use_markup(false)
@@ -680,6 +696,10 @@ fn task_row(ui: &Rc<Ui>, t: &Task, indent: usize) -> adw::ActionRow {
         row.add_css_class("subtask-done"); // stays under its parent instead of moving to "Done"
     }
     row.add_prefix(&done_check(t));
+    if let Some(slot) = slot {
+        // ActionRow puts each new prefix to the left of the previous ones (ExpanderRow: right).
+        connect_dnd(ui, &row, t, slot, |h| row.add_prefix(h));
+    }
     if let Some(d) = subtitle(t) {
         row.set_subtitle(d);
     }
@@ -694,8 +714,8 @@ fn task_row(ui: &Rc<Ui>, t: &Task, indent: usize) -> adw::ActionRow {
 }
 
 /// A root task without subtasks: its "+" turns it into a `tree_row` ready for the first one.
-fn leaf_row(ui: &Rc<Ui>, t: &Task) -> adw::ActionRow {
-    let row = task_row(ui, t, 0);
+fn leaf_row(ui: &Rc<Ui>, t: &Task, slot: Slot) -> adw::ActionRow {
+    let row = task_row(ui, t, 0, Some(slot));
     let add = icon_button("list-add-symbolic", "Add Subtask");
     let (weak, uid) = (Rc::downgrade(ui), t.uid.clone());
     add.connect_clicked(move |_| {
@@ -712,12 +732,20 @@ fn leaf_row(ui: &Rc<Ui>, t: &Task) -> adw::ActionRow {
 
 /// A root task with its subtasks and an entry for adding more.
 /// `start`: new subtasks go first, so the entry for them comes first too.
-fn tree_row(ui: &Rc<Ui>, root: &Task, subs: &[(usize, &Task)], start: bool) -> adw::ExpanderRow {
+fn tree_row(
+    ui: &Rc<Ui>,
+    root: &Task,
+    subs: &[(usize, &Task)],
+    start: bool,
+    slot: Slot,
+) -> adw::ExpanderRow {
     let row = adw::ExpanderRow::builder()
         .title(&root.summary)
         .use_markup(false)
         .expanded(ui.expanded.borrow().contains(&root.uid))
         .build();
+    let slot_group = slot.group.clone();
+    connect_dnd(ui, &row, root, slot, |h| row.add_prefix(h));
     row.add_prefix(&done_check(root));
     if let Some(d) = subtitle(root) {
         row.set_subtitle(d);
@@ -779,13 +807,157 @@ fn tree_row(ui: &Rc<Ui>, root: &Task, subs: &[(usize, &Task)], start: bool) -> a
     if start {
         row.add_row(&entry);
     }
-    for (depth, t) in subs {
-        row.add_row(&task_row(ui, t, *depth));
+    for (i, (depth, t)) in subs.iter().enumerate() {
+        let slot = Slot {
+            group: slot_group.clone(),
+            root: false,
+            next: subs[i + 1..]
+                .iter()
+                .find(|(_, s)| s.parent_uid == t.parent_uid)
+                .map(|(_, s)| s.uid.clone()),
+        };
+        row.add_row(&task_row(ui, t, *depth, Some(slot)));
     }
     if !start {
         row.add_row(&entry);
     }
     row
+}
+
+/// Where a row sits, for drag and drop.
+#[derive(Clone)]
+struct Slot {
+    /// Category group the row is shown in; None is "Other".
+    group: Option<String>,
+    /// A top-level row (otherwise a subtask, movable only among its siblings).
+    root: bool,
+    /// The row after it that a drop below lands in front of; None means last.
+    next: Option<String>,
+}
+
+/// Make `row` draggable (by the whole row, or by a handle passed to `add_handle`) and a drop
+/// target for other tasks: above or below it, depending on which half the pointer is over.
+fn connect_dnd(
+    ui: &Rc<Ui>,
+    row: &impl IsA<gtk::Widget>,
+    t: &Task,
+    slot: Slot,
+    add_handle: impl FnOnce(&gtk::Image),
+) {
+    let drag = gtk::DragSource::new();
+    drag.set_actions(gtk::gdk::DragAction::MOVE);
+    let (weak, task, s) = (Rc::downgrade(ui), t.clone(), slot.clone());
+    drag.connect_prepare(move |src, x, y| {
+        // Without a handle the whole row drags, except from the "Add subtask" entry inside it.
+        let picked = src
+            .widget()
+            .and_then(|w| w.pick(x, y, gtk::PickFlags::DEFAULT));
+        if picked.is_some_and(|p| p.ancestor(adw::EntryRow::static_type()).is_some()) {
+            return None;
+        }
+        let ui = weak.upgrade()?;
+        *ui.dragging.borrow_mut() = Some((task.clone(), s.clone()));
+        Some(gtk::gdk::ContentProvider::for_value(&task.uid.to_value()))
+    });
+    let r = row.clone().upcast::<gtk::Widget>();
+    drag.connect_drag_begin(move |src, _| {
+        src.set_icon(Some(&gtk::WidgetPaintable::new(Some(&r))), 0, 0);
+    });
+    let weak = Rc::downgrade(ui);
+    drag.connect_drag_end(move |_, _, _| {
+        if let Some(ui) = weak.upgrade() {
+            ui.dragging.take();
+        }
+    });
+    if ui.handles.get() {
+        let handle = gtk::Image::from_icon_name("list-drag-handle-symbolic");
+        handle.set_tooltip_text(Some("Drag to Move"));
+        handle.set_cursor_from_name(Some("grab"));
+        handle.add_controller(drag);
+        add_handle(&handle);
+    } else {
+        row.add_controller(drag);
+    }
+
+    let drop = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
+    let (weak, target, s) = (Rc::downgrade(ui), t.clone(), slot.clone());
+    drop.connect_accept(move |_, _| {
+        weak.upgrade().is_some_and(|ui| {
+            let dragging = ui.dragging.borrow();
+            dragging
+                .as_ref()
+                .is_some_and(|(d, ds)| can_drop(d, ds, &target, &s))
+        })
+    });
+    drop.connect_motion(|dt, _, y| {
+        if let Some(w) = dt.widget() {
+            let above = y < w.height() as f64 / 2.0;
+            w.remove_css_class(if above { "drop-below" } else { "drop-above" });
+            w.add_css_class(if above { "drop-above" } else { "drop-below" });
+        }
+        gtk::gdk::DragAction::MOVE
+    });
+    drop.connect_leave(|dt| {
+        if let Some(w) = dt.widget() {
+            w.remove_css_class("drop-above");
+            w.remove_css_class("drop-below");
+        }
+    });
+    let (weak, target) = (Rc::downgrade(ui), t.clone());
+    drop.connect_drop(move |dt, _, _, y| {
+        let Some(ui) = weak.upgrade() else {
+            return false;
+        };
+        let Some(w) = dt.widget() else { return false };
+        w.remove_css_class("drop-above");
+        w.remove_css_class("drop-below");
+        let Some((d, ds)) = ui.dragging.take() else {
+            return false;
+        };
+        let above = y < w.height() as f64 / 2.0;
+        if let Err(e) = drop_task(&d, &ds, &target, &slot, above) {
+            ui.toasts.add_toast(adw::Toast::new(&e.to_string()));
+        }
+        true
+    });
+    row.add_controller(drop);
+}
+
+/// Top-level tasks move within and between groups (changing category); subtasks only among
+/// their siblings. Reordering only means something in manual order.
+fn can_drop(d: &Task, ds: &Slot, t: &Task, ts: &Slot) -> bool {
+    let order = crate::settings::order();
+    if d.uid == t.uid {
+        return false;
+    }
+    if ds.root && ts.root {
+        return ds.group != ts.group || order.tasks == Sort::Manual;
+    }
+    !ds.root && !ts.root && d.parent_uid == t.parent_uid && order.subtasks == Sort::Manual
+}
+
+/// Move dragged task `d` above or below target `t`.
+fn drop_task(d: &Task, ds: &Slot, t: &Task, ts: &Slot, above: bool) -> todav_core::Result<()> {
+    let order = crate::settings::order();
+    if ds.root && ds.group != ts.group {
+        let patch = TaskPatch {
+            category: Some(ts.group.clone().unwrap_or_default()),
+            ..Default::default()
+        };
+        core().update_task(d.uid.clone(), patch)?;
+    }
+    let sort = if ds.root { order.tasks } else { order.subtasks };
+    let before = if above {
+        Some(t.uid.clone())
+    } else {
+        ts.next.clone()
+    };
+    // Dropping right below the task above it leaves `d` where it is.
+    if sort == Sort::Manual && before.as_ref() != Some(&d.uid) {
+        core().reorder(d.uid.clone(), before)?;
+    }
+    request_sync();
+    Ok(())
 }
 
 /// First line of the note; rows use plain text (`use_markup(false)`), so no escaping.
