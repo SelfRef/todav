@@ -4,12 +4,14 @@ use crate::{Event, core, request_sync};
 use adw::prelude::*;
 use gtk::{gio, glib};
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use todav_core::{Task, TaskPatch};
 
 /// Libadwaita only styles plain buttons as pills; round the ends of the sign-in split button to match.
 /// The category section header turns its arrow like an expander row, without a "pressed" look.
+/// Done subtasks are struck through.
 const CSS: &str = "
 splitbutton.pill { border-radius: 9999px; }
 splitbutton.pill > button { padding: 10px 20px 10px 32px; border-radius: 9999px 0 0 9999px; }
@@ -17,7 +19,11 @@ splitbutton.pill > menubutton > button { padding: 10px 16px 10px 12px; border-ra
 .cat-toggle image { transition: -gtk-icon-transform 200ms ease; }
 .cat-toggle:not(:checked) image { -gtk-icon-transform: rotate(-90deg); }
 .cat-toggle:checked:not(:hover) { background: none; }
+row.subtask-done label.title { text-decoration-line: line-through; opacity: 0.55; }
 ";
+
+/// Left margin per subtask level, in pixels.
+const INDENT: i32 = 24;
 
 /// Completed tasks shown in the "Done" expander, newest first.
 const DONE_SHOWN: usize = 50;
@@ -40,6 +46,12 @@ struct Ui {
     cats: gtk::StringList,
     cat: gtk::DropDown,
     groups: gtk::Box,
+    /// Root tasks whose subtasks are shown; kept across rebuilds of the task page.
+    expanded: RefCell<HashSet<String>>,
+    /// Root task shown as an expander for its first subtask, before it has any.
+    adding: RefCell<Option<String>>,
+    /// Root task whose "Add subtask" entry takes focus after the next rebuild.
+    focus_sub: RefCell<Option<String>>,
     server: (gtk::DropDown, adw::EntryRow),
     ntfy: (gtk::DropDown, adw::EntryRow),
     login: adw::SplitButton,
@@ -196,6 +208,9 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         cats: get(&b, "cats"),
         cat: get(&b, "cat"),
         groups: get(&b, "groups"),
+        expanded: RefCell::new(HashSet::new()),
+        adding: RefCell::new(None),
+        focus_sub: RefCell::new(None),
         server: (get(&b, "server_scheme"), get(&b, "server")),
         ntfy: (get(&b, "ntfy_scheme"), get(&b, "ntfy")),
         login: get(&b, "login"),
@@ -542,16 +557,24 @@ fn refresh_tasks(ui: &Rc<Ui>) {
                 g.name.as_deref().unwrap_or("Other"),
             ))
             .build();
-        for t in &g.tasks {
-            group.add(&task_row(ui, t));
+        for (root, subs) in trees(&g.tasks) {
+            let adding = ui.adding.borrow().as_ref() == Some(&root.uid);
+            if subs.is_empty() && !adding {
+                group.add(&leaf_row(ui, root));
+            } else {
+                if adding && !subs.is_empty() {
+                    ui.adding.take(); // the first subtask exists; from now on subtasks decide
+                }
+                group.add(&tree_row(ui, root, &subs));
+            }
         }
         ui.groups.append(&group);
     }
 
     let mut done: Vec<Task> = core()
-        .tasks(href, true)
+        .finished(href)
         .into_iter()
-        .filter(|t| t.done && shown(t.category.as_ref()))
+        .filter(|t| shown(t.category.as_ref()))
         .collect();
     if !done.is_empty() {
         done.sort_by_key(|t| std::cmp::Reverse(t.completed_at));
@@ -559,7 +582,7 @@ fn refresh_tasks(ui: &Rc<Ui>) {
             .title(format!("Done ({})", done.len()))
             .build();
         for t in done.iter().take(DONE_SHOWN) {
-            exp.add_row(&task_row(ui, t));
+            exp.add_row(&task_row(ui, t, 0));
         }
         let group = adw::PreferencesGroup::new();
         group.add(&exp);
@@ -575,15 +598,154 @@ fn refresh_tasks(ui: &Rc<Ui>) {
     }
 }
 
-fn task_row(ui: &Rc<Ui>, t: &Task) -> adw::ActionRow {
+/// Split a group's depth-first task list into root tasks, each with its (depth, subtask) list.
+fn trees(tasks: &[Task]) -> Vec<(&Task, Vec<(usize, &Task)>)> {
+    let mut depth = HashMap::new();
+    let mut out: Vec<(&Task, Vec<(usize, &Task)>)> = Vec::new();
+    for t in tasks {
+        match t.parent_uid.as_ref().and_then(|p| depth.get(p).copied()) {
+            Some(d) => {
+                depth.insert(&t.uid, d + 1);
+                out.last_mut().unwrap().1.push((d + 1, t)); // a parent always precedes its subtasks
+            }
+            None => {
+                depth.insert(&t.uid, 0usize);
+                out.push((t, Vec::new()));
+            }
+        }
+    }
+    out
+}
+
+/// `indent` levels of left margin on the whole row, for subtasks.
+fn task_row(ui: &Rc<Ui>, t: &Task, indent: usize) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
         .title(&t.summary)
         .use_markup(false)
         .activatable(true)
         .build();
-    if t.parent_uid.is_some() && !t.done {
-        row.add_prefix(&gtk::Box::builder().width_request(18).build());
+    row.set_margin_start(INDENT * indent as i32);
+    if t.done && indent > 0 {
+        row.add_css_class("subtask-done"); // stays under its parent instead of moving to "Done"
     }
+    row.add_prefix(&done_check(t));
+    if let Some(d) = subtitle(t) {
+        row.set_subtitle(d);
+    }
+    row.add_suffix(&delete_button(t));
+    let (weak, task) = (Rc::downgrade(ui), t.clone());
+    row.connect_activated(move |_| {
+        if let Some(ui) = weak.upgrade() {
+            edit_dialog(&ui, &task);
+        }
+    });
+    row
+}
+
+/// A root task without subtasks: its "+" turns it into a `tree_row` ready for the first one.
+fn leaf_row(ui: &Rc<Ui>, t: &Task) -> adw::ActionRow {
+    let row = task_row(ui, t, 0);
+    let add = icon_button("list-add-symbolic", "Add Subtask");
+    let (weak, uid) = (Rc::downgrade(ui), t.uid.clone());
+    add.connect_clicked(move |_| {
+        let Some(ui) = weak.upgrade() else { return };
+        ui.expanded.borrow_mut().insert(uid.clone());
+        *ui.adding.borrow_mut() = Some(uid.clone());
+        *ui.focus_sub.borrow_mut() = Some(uid.clone());
+        // Rebuild outside the handler: refresh_tasks replaces this row.
+        glib::idle_add_local_once(move || refresh_tasks(&ui));
+    });
+    row.add_suffix(&add);
+    row
+}
+
+/// A root task with its subtasks and an entry for adding more.
+fn tree_row(ui: &Rc<Ui>, root: &Task, subs: &[(usize, &Task)]) -> adw::ExpanderRow {
+    let row = adw::ExpanderRow::builder()
+        .title(&root.summary)
+        .use_markup(false)
+        .expanded(ui.expanded.borrow().contains(&root.uid))
+        .build();
+    row.add_prefix(&done_check(root));
+    if let Some(d) = subtitle(root) {
+        row.set_subtitle(d);
+    }
+    // The header toggles the subtasks, so editing gets its own button.
+    let edit = icon_button("document-edit-symbolic", "Edit");
+    let (weak, task) = (Rc::downgrade(ui), root.clone());
+    edit.connect_clicked(move |_| {
+        if let Some(ui) = weak.upgrade() {
+            edit_dialog(&ui, &task);
+        }
+    });
+    row.add_suffix(&edit);
+    row.add_suffix(&delete_button(root));
+    let (weak, uid) = (Rc::downgrade(ui), root.uid.clone());
+    let empty = subs.is_empty();
+    row.connect_expanded_notify(move |r| {
+        let Some(ui) = weak.upgrade() else { return };
+        if r.is_expanded() {
+            ui.expanded.borrow_mut().insert(uid.clone());
+            return;
+        }
+        ui.expanded.borrow_mut().remove(&uid);
+        // Closed before adding a first subtask: back to a plain row with "+".
+        if empty && ui.adding.borrow().as_ref() == Some(&uid) {
+            ui.adding.take();
+            glib::idle_add_local_once(move || refresh_tasks(&ui));
+        }
+    });
+
+    for (depth, t) in subs {
+        row.add_row(&task_row(ui, t, *depth));
+    }
+    let entry = adw::EntryRow::builder().title("Add subtask").build();
+    entry.set_margin_start(INDENT);
+    entry.add_prefix(&gtk::Image::from_icon_name("list-add-symbolic"));
+    if ui.focus_sub.borrow().as_ref() == Some(&root.uid) {
+        ui.focus_sub.take();
+        let e = entry.clone();
+        glib::idle_add_local_once(move || {
+            e.grab_focus();
+        });
+    }
+    let (weak, root) = (Rc::downgrade(ui), root.clone());
+    entry.connect_entry_activated(move |e| {
+        let Some(ui) = weak.upgrade() else { return };
+        let text = e.text().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let parent = Some(root.uid.clone());
+        match core().add_task(root.list_href.clone(), text, root.category.clone(), parent) {
+            Ok(_) => {
+                e.set_text("");
+                *ui.focus_sub.borrow_mut() = Some(root.uid.clone()); // keep typing after the rebuild
+                request_sync();
+            }
+            Err(err) => ui.toasts.add_toast(adw::Toast::new(&err.to_string())),
+        }
+    });
+    row.add_row(&entry);
+    row
+}
+
+/// First line of the note; rows use plain text (`use_markup(false)`), so no escaping.
+fn subtitle(t: &Task) -> Option<&str> {
+    Some(t.description.as_deref()?.lines().next().unwrap_or_default())
+}
+
+fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
+    let b = gtk::Button::builder()
+        .icon_name(icon)
+        .valign(gtk::Align::Center)
+        .tooltip_text(tooltip)
+        .build();
+    b.add_css_class("flat");
+    b
+}
+
+fn done_check(t: &Task) -> gtk::CheckButton {
     let check = gtk::CheckButton::builder()
         .active(t.done)
         .valign(gtk::Align::Center)
@@ -594,32 +756,18 @@ fn task_row(ui: &Rc<Ui>, t: &Task) -> adw::ActionRow {
             request_sync();
         }
     });
-    row.add_prefix(&check);
-    if let Some(d) = &t.description {
-        row.set_subtitle(&glib::markup_escape_text(
-            d.lines().next().unwrap_or_default(),
-        ));
-    }
-    let del = gtk::Button::builder()
-        .icon_name("user-trash-symbolic")
-        .valign(gtk::Align::Center)
-        .tooltip_text("Delete")
-        .build();
-    del.add_css_class("flat");
+    check
+}
+
+fn delete_button(t: &Task) -> gtk::Button {
+    let del = icon_button("user-trash-symbolic", "Delete");
     let uid = t.uid.clone();
     del.connect_clicked(move |_| {
         if core().delete_task(uid.clone()).is_ok() {
             request_sync();
         }
     });
-    row.add_suffix(&del);
-    let (weak, task) = (Rc::downgrade(ui), t.clone());
-    row.connect_activated(move |_| {
-        if let Some(ui) = weak.upgrade() {
-            edit_dialog(&ui, &task);
-        }
-    });
-    row
+    del
 }
 
 fn edit_dialog(ui: &Rc<Ui>, t: &Task) {
@@ -648,4 +796,57 @@ fn edit_dialog(ui: &Rc<Ui>, t: &Task) {
         }
     });
     dialog.present(Some(&ui.window));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(uid: &str, parent: Option<&str>) -> Task {
+        Task {
+            uid: uid.into(),
+            list_href: String::new(),
+            summary: uid.into(),
+            description: None,
+            status: String::new(),
+            done: false,
+            completed_at: None,
+            category: None,
+            parent_uid: parent.map(Into::into),
+            priority: None,
+            due: None,
+            sort_order: None,
+            created: None,
+            last_modified: None,
+        }
+    }
+
+    #[test]
+    fn trees_nest_depth_first_lists() {
+        let tasks = [
+            task("a", None),
+            task("a1", Some("a")),
+            task("a1x", Some("a1")),
+            task("a2", Some("a")),
+            task("b", None),
+            task("c", Some("gone")), // parent closed or deleted: shown as a root
+        ];
+        let got: Vec<(&str, Vec<(usize, &str)>)> = trees(&tasks)
+            .into_iter()
+            .map(|(r, s)| {
+                (
+                    r.uid.as_str(),
+                    s.iter().map(|(d, t)| (*d, t.uid.as_str())).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("a", vec![(1, "a1"), (2, "a1x"), (1, "a2")]),
+                ("b", vec![]),
+                ("c", vec![]),
+            ]
+        );
+    }
 }
