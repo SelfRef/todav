@@ -243,6 +243,11 @@ impl Client {
         self.modify(&uid, |cal| set_done(cal, done, now()))
     }
 
+    /// Make a subtask a top-level task (its own subtasks come along).
+    pub fn promote(&self, uid: String) -> Result<()> {
+        self.modify(&uid, |cal| cal.clear_parent())
+    }
+
     pub fn update_task(&self, uid: String, patch: TaskPatch) -> Result<()> {
         self.modify(&uid, |cal| {
             if let Some(s) = &patch.summary {

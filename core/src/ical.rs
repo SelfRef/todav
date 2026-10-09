@@ -184,6 +184,22 @@ impl Calendar {
             .collect()
     }
 
+    /// Drop the parent link (RELATED-TO without RELTYPE or RELTYPE=PARENT); other relations stay.
+    pub fn clear_parent(&mut self) {
+        let idx: Vec<usize> = self
+            .todo_props()
+            .filter(|(_, l)| {
+                l.name == "RELATED-TO"
+                    && l.param("RELTYPE")
+                        .is_none_or(|r| r.eq_ignore_ascii_case("PARENT"))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        for i in idx.into_iter().rev() {
+            self.lines.remove(i);
+        }
+    }
+
     pub fn parent_uid(&self) -> Option<String> {
         self.props("RELATED-TO")
             .find(|l| {
@@ -400,6 +416,17 @@ mod tests {
     fn empty_values_read_as_absent() {
         let c = Calendar::parse("BEGIN:VCALENDAR\nBEGIN:VTODO\nUID:u\nDESCRIPTION:\nRELATED-TO:\nEND:VTODO\nEND:VCALENDAR\n").unwrap();
         assert_eq!((c.text("DESCRIPTION"), c.parent_uid()), (None, None));
+    }
+
+    #[test]
+    fn clear_parent_keeps_other_relations() {
+        let mut c = Calendar::parse(
+            "BEGIN:VCALENDAR\nBEGIN:VTODO\nUID:u\nRELATED-TO;RELTYPE=PARENT:p\nRELATED-TO;RELTYPE=SIBLING:s\nEND:VTODO\nEND:VCALENDAR\n",
+        )
+        .unwrap();
+        c.clear_parent();
+        assert_eq!(c.parent_uid(), None);
+        assert!(c.to_ics().contains("RELATED-TO;RELTYPE=SIBLING:s"));
     }
 
     #[test]
