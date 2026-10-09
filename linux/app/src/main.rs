@@ -1,6 +1,7 @@
 //! Todav for Linux: GTK UI + background service (sync worker, ntfy push listener, D-Bus API).
 
 mod dbus;
+mod settings;
 mod window;
 
 use adw::prelude::*;
@@ -116,6 +117,17 @@ pub fn restore_account() -> bool {
 
 // --- background --------------------------------------------------------------
 
+/// Stop the push listener and start a new one if an ntfy server is configured.
+pub fn restart_push() {
+    core().stop_listening();
+    if let Some(ntfy) = core().setting("ntfy_url".into()).filter(|u| !u.is_empty()) {
+        std::thread::spawn(move || {
+            // Blocks until the next restart_push; reconnects internally.
+            let _ = core().listen(ntfy, &|r| set_state(&r));
+        });
+    }
+}
+
 /// Start the sync worker and, if an ntfy server is configured, the push listener. Idempotent.
 pub fn start_background() {
     if SYNC.get().is_some() {
@@ -134,12 +146,7 @@ pub fn start_background() {
     });
     request_sync();
 
-    if let Some(ntfy) = core().setting("ntfy_url".into()).filter(|u| !u.is_empty()) {
-        std::thread::spawn(move || {
-            // Blocks forever; reconnects internally.
-            let _ = core().listen(ntfy, &|r| set_state(&r));
-        });
-    }
+    restart_push();
 
     // Safety net for lost pushes: every minute while the window is focused, every 30 min otherwise.
     let mut ticks = 0u32;

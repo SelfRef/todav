@@ -1,0 +1,50 @@
+using Gtk 4.0;
+using Adw 1;
+
+Adw.PreferencesDialog dialog {
+  search-enabled: false;
+
+  Adw.PreferencesPage {
+    description: "Changes are applied when this window closes";
+
+    Adw.PreferencesGroup {
+      title: "Servers";
+
+      Adw.EntryRow server {
+        title: "Nextcloud server";
+
+        [prefix]
+        Gtk.DropDown server_scheme {
+          valign: center;
+          model: Gtk.StringList { strings ["https", "http"] };
+          styles ["flat"]
+        }
+
+        [suffix]
+        Gtk.Button server_test {
+          label: "Test";
+          valign: center;
+          styles ["flat"]
+        }
+      }
+
+      Adw.EntryRow ntfy {
+        title: "ntfy server for push (optional)";
+
+        [prefix]
+        Gtk.DropDown ntfy_scheme {
+          valign: center;
+          model: Gtk.StringList { strings ["https", "http"] };
+          styles ["flat"]
+        }
+
+        [suffix]
+        Gtk.Button ntfy_test {
+          label: "Test";
+          valign: center;
+          styles ["flat"]
+        }
+      }
+    }
+  }
+}

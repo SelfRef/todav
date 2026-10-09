@@ -78,6 +78,7 @@ pub fn setup_actions(app: &adw::Application) {
     app.set_accels_for_action("app.sync", &["F5"]);
     app.set_accels_for_action("app.quit", &["<Control>q"]);
     app.set_accels_for_action("window.close", &["<Control>w"]);
+    app.set_accels_for_action("win.preferences", &["<Control>comma"]);
 }
 
 pub fn present(app: &adw::Application) {
@@ -93,6 +94,12 @@ pub fn present(app: &adw::Application) {
         refresh_lists(&ui);
     }
     ui.window.present();
+}
+
+pub fn toast(msg: &str) {
+    if let Some(ui) = ui() {
+        ui.toasts.add_toast(adw::Toast::new(msg));
+    }
 }
 
 pub fn show_list(href: &str) {
@@ -145,8 +152,9 @@ macro_rules! view {
         gtk::Builder::from_string(include_str!(concat!(env!("OUT_DIR"), "/", $name, ".ui")))
     };
 }
+pub(crate) use view;
 
-fn get<T: IsA<glib::Object>>(b: &gtk::Builder, id: &str) -> T {
+pub fn get<T: IsA<glib::Object>>(b: &gtk::Builder, id: &str) -> T {
     b.object(id).unwrap_or_else(|| panic!("no `{id}` in view"))
 }
 
@@ -240,6 +248,15 @@ fn connect(ui: &Rc<Ui>) {
     ui.window.add_action(&copy);
 
     let weak = Rc::downgrade(ui);
+    let prefs = gio::SimpleAction::new("preferences", None);
+    prefs.connect_activate(move |_, _| {
+        if let Some(ui) = weak.upgrade().filter(|_| crate::logged_in()) {
+            crate::settings::present(&ui.window);
+        }
+    });
+    ui.window.add_action(&prefs);
+
+    let weak = Rc::downgrade(ui);
     ui.cancel_login.connect_clicked(move |_| {
         LOGIN_ATTEMPT.fetch_add(1, Ordering::SeqCst); // the running attempt sees it is stale and stops
         if let Some(ui) = weak.upgrade() {
@@ -249,7 +266,7 @@ fn connect(ui: &Rc<Ui>) {
 }
 
 /// Full URL from a scheme picker and host entry; empty stays empty, a typed scheme wins over the picker.
-fn url_text((scheme, row): &(gtk::DropDown, adw::EntryRow)) -> String {
+pub fn url_text((scheme, row): &(gtk::DropDown, adw::EntryRow)) -> String {
     let host = row.text().trim().to_string();
     if host.is_empty() || host.contains("://") {
         return host;
