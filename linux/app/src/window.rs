@@ -45,10 +45,8 @@ struct Ui {
     filter: RefCell<Option<(String, Option<String>)>>,
     /// Categories created in the picker per list, shown until a task or the config has them.
     new_cats: RefCell<Vec<(String, String)>>,
-    /// Picker selection to return to when "New Category…" is chosen.
-    cat_prev: Cell<u32>,
-    /// Set while refresh_tasks rewrites the picker, so its handler ignores the changes.
-    cat_busy: Cell<bool>,
+    /// Set while refresh_tasks rewrites the picker, so "New Category…" handling ignores it.
+    cat_busy: Rc<Cell<bool>>,
     hrefs: RefCell<Vec<String>>,
     current: RefCell<Option<String>>,
     title: adw::WindowTitle,
@@ -213,8 +211,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         cat_rows: RefCell::new(Vec::new()),
         filter: RefCell::new(None),
         new_cats: RefCell::new(Vec::new()),
-        cat_prev: Cell::new(0),
-        cat_busy: Cell::new(false),
+        cat_busy: Rc::new(Cell::new(false)),
         hrefs: RefCell::new(Vec::new()),
         current: RefCell::new(None),
         title: get(&b, "title"),
@@ -271,21 +268,13 @@ fn connect(ui: &Rc<Ui>) {
         glib::idle_add_local_once(move || refresh_tasks(&ui));
     });
 
-    // The picker's last item asks for a new category instead of being a choice.
-    let weak = Rc::downgrade(ui);
-    ui.cat.connect_selected_notify(move |dd| {
-        let Some(ui) = weak.upgrade() else { return };
-        if ui.cat_busy.get() {
-            return;
+    connect_new_category(ui, &ui.cat, &ui.cats, ui.cat_busy.clone(), |ui, name| {
+        let href = ui.current.borrow().clone();
+        if let Some(href) = href {
+            ui.new_cats.borrow_mut().push((href, name.clone()));
         }
-        if dd.selected() + 1 == ui.cats.n_items() {
-            ui.cat_busy.set(true);
-            dd.set_selected(ui.cat_prev.get());
-            ui.cat_busy.set(false);
-            new_category_dialog(&ui);
-        } else {
-            ui.cat_prev.set(dd.selected());
-        }
+        refresh_tasks(ui);
+        select_name(&ui.cat, &ui.cats, &name);
     });
 
     let weak = Rc::downgrade(ui);
@@ -558,7 +547,6 @@ fn refresh_tasks(ui: &Rc<Ui>) {
     ui.cats.splice(0, ui.cats.n_items(), &refs);
     ui.cat.set_selected(sel as u32);
     ui.cat_busy.set(false);
-    ui.cat_prev.set(sel as u32);
 
     // Sidebar categories plus "Other"; rebuilt only when they change, so the selection holds.
     let rows: Vec<Option<String>> = names
@@ -825,10 +813,7 @@ fn delete_button(t: &Task) -> gtk::Button {
 }
 
 /// Ask for a category name; it joins this list's categories and becomes the picker's choice.
-fn new_category_dialog(ui: &Rc<Ui>) {
-    let Some(href) = ui.current.borrow().clone() else {
-        return;
-    };
+fn new_category_dialog(ui: &Rc<Ui>, created: impl Fn(&Rc<Ui>, String) + 'static) {
     let b = view!("new-category");
     let dialog: adw::AlertDialog = get(&b, "dialog");
     let name: adw::EntryRow = get(&b, "name");
@@ -836,28 +821,89 @@ fn new_category_dialog(ui: &Rc<Ui>) {
     name.connect_changed(move |e| d.set_response_enabled("create", !e.text().trim().is_empty()));
     let weak = Rc::downgrade(ui);
     dialog.connect_response(Some("create"), move |_, _| {
-        let Some(ui) = weak.upgrade() else { return };
-        let name = name.text().trim().to_string();
-        ui.new_cats.borrow_mut().push((href.clone(), name.clone()));
-        refresh_tasks(&ui);
-        if let Some(i) =
-            (0..ui.cats.n_items()).find(|&i| ui.cats.string(i).as_deref() == Some(&name))
-        {
-            ui.cat.set_selected(i);
+        if let Some(ui) = weak.upgrade() {
+            created(&ui, name.text().trim().to_string());
         }
     });
     dialog.present(Some(&ui.window));
+}
+
+/// Make the last item of `model` ("New Category…") ask for a name instead of being picked.
+/// `picker` is a DropDown or ComboRow showing `model`; changes made while `busy` are ignored.
+fn connect_new_category(
+    ui: &Rc<Ui>,
+    picker: &impl IsA<glib::Object>,
+    model: &gtk::StringList,
+    busy: Rc<Cell<bool>>,
+    created: impl Fn(&Rc<Ui>, String) + 'static,
+) {
+    let prev = Cell::new(picker.property::<u32>("selected"));
+    let (weak, model, created) = (Rc::downgrade(ui), model.clone(), Rc::new(created));
+    picker.connect_notify_local(Some("selected"), move |p, _| {
+        let sel = p.property::<u32>("selected");
+        if sel + 1 != model.n_items() {
+            prev.set(sel);
+            return;
+        }
+        let Some(ui) = weak.upgrade().filter(|_| !busy.get()) else {
+            return;
+        };
+        busy.set(true);
+        p.set_property("selected", prev.get());
+        busy.set(false);
+        let created = created.clone();
+        new_category_dialog(&ui, move |ui, name| created(ui, name));
+    });
+}
+
+fn select_name(picker: &impl IsA<glib::Object>, model: &gtk::StringList, name: &str) {
+    if let Some(i) = (0..model.n_items()).find(|&i| model.string(i).as_deref() == Some(name)) {
+        picker.set_property("selected", i);
+    }
 }
 
 fn edit_dialog(ui: &Rc<Ui>, t: &Task) {
     let b = view!("edit-dialog");
     let dialog: adw::AlertDialog = get(&b, "dialog");
     let summary: adw::EntryRow = get(&b, "summary");
-    let category: adw::EntryRow = get(&b, "category");
+    let category: adw::ComboRow = get(&b, "category");
+    let cats: gtk::StringList = get(&b, "cats");
     let description: adw::EntryRow = get(&b, "description");
     summary.set_text(&t.summary);
-    category.set_text(t.category.as_deref().unwrap_or_default());
     description.set_text(t.description.as_deref().unwrap_or_default());
+
+    // Same choices as the new-task picker, plus the task's own category if that lacks it.
+    let items: Vec<glib::GString> = (0..ui.cats.n_items())
+        .filter_map(|i| ui.cats.string(i))
+        .collect();
+    let mut items: Vec<&str> = items.iter().map(|s| s.as_str()).collect();
+    if let Some(c) = t.category.as_deref().filter(|c| !items[1..].contains(c)) {
+        items.insert(items.len() - 1, c);
+    }
+    cats.splice(0, cats.n_items(), &items);
+    category.set_selected(0);
+    if let Some(c) = &t.category {
+        select_name(&category, &cats, c);
+    }
+    let busy = Rc::new(Cell::new(false));
+    let (combo, list, uid) = (category.downgrade(), cats.clone(), t.uid.clone());
+    let b2 = busy.clone();
+    connect_new_category(ui, &category, &cats, busy, move |_, name| {
+        // A category made from this dialog applies to the task right away.
+        let patch = TaskPatch {
+            category: Some(name.clone()),
+            ..Default::default()
+        };
+        if core().update_task(uid.clone(), patch).is_ok() {
+            request_sync();
+        }
+        b2.set(true);
+        list.splice(list.n_items() - 1, 0, &[name.as_str()]);
+        b2.set(false);
+        if let Some(c) = combo.upgrade() {
+            c.set_selected(list.n_items() - 2);
+        }
+    });
     let task = t.clone();
     dialog.connect_response(Some("save"), move |_, _| {
         // Only send what changed: a one-line entry would flatten a multi-line note.
@@ -866,7 +912,14 @@ fn edit_dialog(ui: &Rc<Ui>, t: &Task) {
         let patch = TaskPatch {
             summary: changed(summary.text().trim().to_string(), Some(&task.summary))
                 .filter(|s| !s.is_empty()),
-            category: changed(category.text().trim().to_string(), task.category.as_deref()),
+            category: changed(
+                (category.selected() > 0)
+                    .then(|| cats.string(category.selected()))
+                    .flatten()
+                    .map(String::from)
+                    .unwrap_or_default(),
+                task.category.as_deref(),
+            ),
             description: changed(description.text().to_string(), task.description.as_deref()),
         };
         let uid = task.uid.clone();

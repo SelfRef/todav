@@ -10,8 +10,9 @@ Adw.AlertDialog dialog {
       title: "Title";
     }
 
-    Adw.EntryRow category {
+    Adw.ComboRow category {
       title: "Category";
+      model: Gtk.StringList cats {};
     }
 
     Adw.EntryRow description {
